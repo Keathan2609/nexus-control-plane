@@ -1,0 +1,110 @@
+# NEXUS local development stack.
+#
+# Host ports are deliberately offset from the defaults (Postgres on 5436 rather than
+# 5432, Prometheus on 9091 rather than 9090) so this stack can run alongside other
+# projects on the same machine without a port collision. Container-internal ports are
+# the conventional ones.
+#
+#   docker compose -f deployments/docker/docker-compose.yml up -d
+#
+# Bring up only the backing services while developing the Go binaries on the host:
+#
+#   docker compose -f deployments/docker/docker-compose.yml up -d postgres nats
+
+name: nexus
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nexus-postgres
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus
+      POSTGRES_DB: nexus
+      # Deterministic collation so ORDER BY on text columns behaves identically here and
+      # in CI, where the base image locale may differ.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5436:5432"
+    volumes:
+      - nexus-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: nexus-nats
+    # JetStream is what makes NATS durable rather than fire-and-forget. -sd sets the
+    # store directory so streams survive a container restart.
+    command:
+      - "-js"
+      - "-sd=/data"
+      - "-m=8222"
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring / healthz
+    volumes:
+      - nexus-nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8222/healthz || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: nexus-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ../../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - nexus-prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=6h"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    container_name: nexus-grafana
+    ports:
+      - "3300:3000"
+    environment:
+      # Local development only: anonymous read access removes a login step that adds
+      # nothing on a laptop. The Helm chart does not do this.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ../../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - nexus-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: nexus-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16687:16686"   # UI
+      - "4319:4318"     # OTLP/HTTP
+    restart: unless-stopped
+
+volumes:
+  nexus-postgres-data:
+  nexus-nats-data:
+  nexus-prometheus-data:
+  nexus-grafana-data:
