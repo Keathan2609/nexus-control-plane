@@ -1,0 +1,187 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored; this file
+# is not, so nothing secret belongs in it.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# There are no credentials in this file and there should never be. AWS
+# authentication comes from the ambient chain - an SSO profile, environment
+# variables, or the CI role:
+#
+#   aws sso login --profile nexus-production
+#   export AWS_PROFILE=nexus-production
+#
+# The database password, JWT signing key and webhook secret are all generated
+# during apply and read back with `tofu output`.
+#
+# APPLYING THIS COSTS MONEY. Read the cost section of ../../README.md first.
+
+# ---------------------------------------------------------------------------
+# Required: account and cluster
+# ---------------------------------------------------------------------------
+
+aws_region  = "eu-west-1"
+environment = "production"
+
+# An EXISTING EKS cluster. This stack does not create one.
+#   aws eks list-clusters --region eu-west-1
+eks_cluster_name = "nexus-production"
+
+# ---------------------------------------------------------------------------
+# Required: network
+#
+# Private subnets in at least two availability zones. RDS requires two AZs even
+# for a single-AZ instance, so that a failover has somewhere to go.
+#   aws ec2 describe-subnets --filters Name=vpc-id,Values=vpc-0123456789abcdef0 \
+#     --query 'Subnets[].{id:SubnetId,az:AvailabilityZone,public:MapPublicIpOnLaunch}'
+# ---------------------------------------------------------------------------
+
+vpc_id = "vpc-0123456789abcdef0"
+
+database_subnet_ids = [
+  "subnet-0aaaaaaaaaaaaaaa1",
+  "subnet-0bbbbbbbbbbbbbbb2",
+]
+
+# The EKS node group security group, so pods can reach PostgreSQL on 5432.
+# A security group reference survives subnet renumbering; a CIDR block does not.
+#   aws eks describe-cluster --name nexus-production \
+#     --query 'cluster.resourcesVpcConfig.securityGroupIds'
+node_security_group_ids = ["sg-0123456789abcdef0"]
+
+# ---------------------------------------------------------------------------
+# Required: image version
+#
+# No default on purpose. The running version of a production system is a
+# decision, and `latest` is rejected by both this stack and the chart.
+# ---------------------------------------------------------------------------
+
+image_tag = "0.1.0"
+
+# ---------------------------------------------------------------------------
+# Required: event bus
+#
+# An existing NATS 2.10 cluster with JetStream. Not created here: a Raft-quorum
+# JetStream cluster is a stateful system with its own upgrade and backup
+# lifecycle. Run it with the NATS operator, or point this at a managed endpoint.
+# ---------------------------------------------------------------------------
+
+nats_url = "nats://nats.messaging.svc.cluster.local:4222"
+
+# ---------------------------------------------------------------------------
+# Strongly recommended: IRSA
+#
+# Without these, NEXUS pods have no AWS identity and cannot read the database
+# credential from Secrets Manager. The stack still runs - the DSN is in the
+# Kubernetes Secret - but the rotation and break-glass paths do not exist, and
+# the plan prints a check warning saying so.
+#
+#   aws eks describe-cluster --name nexus-production \
+#     --query 'cluster.identity.oidc.issuer' --output text
+#
+# The URL below is that value with https:// stripped.
+# ---------------------------------------------------------------------------
+
+# eks_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E"
+# eks_oidc_provider_url = "oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B716D3041E"
+
+# ---------------------------------------------------------------------------
+# First apply against a fresh account
+#
+# Set this false, apply, push the images to the ECR repositories the apply
+# creates, then set it true and apply again. Otherwise the first apply times
+# out pulling images that do not exist yet.
+# ---------------------------------------------------------------------------
+
+# deploy_workloads = true
+
+# ---------------------------------------------------------------------------
+# Database sizing and durability. These are the lines that move the bill.
+# ---------------------------------------------------------------------------
+
+# db_instance_class = "db.t4g.small"
+
+# Roughly doubles the instance cost. It is the difference between a failover
+# measured in a minute or two and one measured in however long a restore takes.
+# db_multi_az = true
+
+# Also the point-in-time recovery window.
+# db_backup_retention_days = 14
+
+# db_allocated_storage_gb     = 50
+# db_max_allocated_storage_gb = 200
+
+# Leave on. `tofu destroy` should not be able to take the system of record with
+# it in one command.
+# db_deletion_protection = true
+
+# Customer-managed KMS key for RDS, Secrets Manager and ECR. null uses the
+# AWS-managed keys, which are free but cannot carry their own key policy.
+# kms_key_arn = null
+
+# ---------------------------------------------------------------------------
+# Exposure
+#
+# The Ingress is off by default because it depends on an ingress controller and
+# a DNS record this stack does not manage.
+# ---------------------------------------------------------------------------
+
+# ingress_enabled         = true
+# ingress_host            = "nexus.example.com"
+# ingress_class_name      = "nginx"
+# ingress_tls_secret_name = "nexus-tls"
+
+# On by default. Confirm your CNI actually enforces NetworkPolicy first -
+# Calico and Cilium do, some managed defaults do not.
+# network_policy_enabled       = true
+# ingress_controller_namespace = "ingress-nginx"
+
+# ---------------------------------------------------------------------------
+# Workload sizing
+# ---------------------------------------------------------------------------
+
+# api_replicas    = 3
+# worker_replicas = 3
+# web_replicas    = 2
+
+# nexus-reconciler is fixed at 1 and is not configurable: it is a single
+# control loop with no leader election, and the chart rejects the value.
+
+# log_level            = "info"
+# worker_concurrency   = 8
+# worker_lease_seconds = 60
+
+# otel_endpoint = "http://otel-collector.observability.svc.cluster.local:4317"
+
+# Autoscaling floors must be at least the replica counts above, or the HPA
+# scales the deployment down shortly after apply. The plan checks this.
+# api_autoscaling = {
+#   enabled      = true
+#   min_replicas = 3
+#   max_replicas = 10
+#   target_cpu   = 70
+# }
+
+# ---------------------------------------------------------------------------
+# Occasionally changed
+# ---------------------------------------------------------------------------
+
+# namespace   = "nexus"
+# name_prefix = "nexus"
+
+# Pull from a mirror or from GHCR instead of the ECR repositories this stack
+# creates. Leave unset for the normal path.
+# image_registry = null
+
+# Deploy a packaged, versioned chart instead of the one in this repository,
+# which is what a real release pipeline should do.
+# chart_path    = "oci://ghcr.io/keathan2609/charts/nexus"
+# chart_version = "0.1.0"
+
+# A second Prometheus is cost and confusion if you already have monitoring.
+# enable_observability = false
+
+# Cost centre, owner, ticket reference. Cost allocation in AWS is tag-driven.
+# extra_tags = {
+#   CostCentre = "platform"
+#   Owner      = "platform-team"
+# }

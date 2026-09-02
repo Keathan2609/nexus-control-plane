@@ -1,0 +1,42 @@
+apiVersion: v2
+name: nexus
+description: NEXUS - internal developer platform and software delivery control plane
+type: application
+
+# version is the chart version, appVersion is the NEXUS release. They move independently:
+# a packaging fix bumps `version` only, a NEXUS release bumps both. Keeping them separate is
+# what lets you roll back a bad chart change without rolling back the application.
+version: 0.1.0
+appVersion: "0.1.0"
+
+home: https://github.com/Keathan2609/nexus
+sources:
+  - https://github.com/Keathan2609/nexus
+
+keywords:
+  - platform-engineering
+  - internal-developer-platform
+  - gitops
+  - ci-cd
+  - control-plane
+
+maintainers:
+  - name: NEXUS Platform Team
+
+annotations:
+  category: DeveloperTools
+
+# No `dependencies:` block, on purpose.
+#
+# PostgreSQL and NATS can both be run in-cluster from this chart (postgresql.enabled /
+# nats.enabled), but they are implemented as templates here rather than pulled in as
+# subcharts. Two reasons:
+#
+#   1. The chart stays installable, lintable and renderable with no network access and no
+#      `helm dependency update` step. That matters for air-gapped installs and for CI.
+#   2. Subchart values sprawl. Bitnami's postgresql chart exposes several hundred values;
+#      wiring NEXUS through them means our security defaults are only as good as whatever
+#      the subchart happens to do this month.
+#
+# The bundled dependencies are sized for evaluation and non-production. For anything real,
+# leave them disabled and point externalDatabase/nats at a managed service or an operator.

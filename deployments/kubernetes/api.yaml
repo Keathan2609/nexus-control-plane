@@ -1,0 +1,217 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-api
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  # Explicit rolling update. maxUnavailable 0 means we never drop below the declared
+  # replica count during a deploy - the control plane API is what every CI pipeline and
+  # every console tab talks to, and a 500 during a routine rollout looks like an outage
+  # to everyone downstream. One extra pod (maxSurge 1) is the cheap side of that trade.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/instance: nexus
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus
+        app.kubernetes.io/instance: nexus
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: nexus
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: kustomize
+        # Consumed by the NetworkPolicy that fronts PostgreSQL. Membership in this label is
+        # the whole authorisation model for reaching the system of record, so adding it to a
+        # new workload should be a reviewed decision rather than a copy-paste.
+        nexus.dev/database-client: "true"
+        nexus.dev/nats-client: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: nexus-api
+      automountServiceAccountToken: false
+      # 60s. The API serves SSE streams for live pipeline logs; those connections are
+      # long-lived by design, and a client cut mid-stream reconnects and refetches backlog,
+      # which is wasteful at scale. 60s lets in-flight requests drain and gives SSE clients
+      # a window to migrate. It is not longer because nothing the API does should
+      # legitimately take more than a minute to finish.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Keep replicas off a single node or zone so a drain or AZ blip cannot take the whole
+      # control plane API with it. ScheduleAnyway rather than DoNotSchedule: on a small or
+      # single-zone cluster we would rather run skewed than not run at all.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus
+              app.kubernetes.io/component: api
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus
+              app.kubernetes.io/component: api
+      containers:
+        - name: api
+          image: ghcr.io/keathan2609/nexus-api:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: nexus-config
+            - secretRef:
+                name: nexus-secrets
+          env:
+            - name: NEXUS_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # Three probes doing three different jobs:
+          #  - startup absorbs slow first boot (schema check, NATS connect) so liveness can
+          #    stay aggressive afterwards without killing a cold pod.
+          #  - liveness only asks whether the process is wedged. It must NOT depend on
+          #    Postgres, or a database blip cascades into a cluster-wide restart storm.
+          #  - readiness gates traffic and is allowed to fail on dependency loss.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Endpoint removal across kube-proxy and ingress controllers is eventually
+              # consistent. Without this pause the container can stop accepting connections
+              # before every data plane has stopped sending them, which shows up as
+              # sporadic 502s on an otherwise healthy deploy.
+              sleep:
+                seconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # readOnlyRootFilesystem leaves the process with nowhere to write. Temp files,
+        # multipart upload buffering and telemetry spooling all want /tmp, so give them a
+        # bounded emptyDir instead of unlocking the whole root filesystem.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-api
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  # Left at None deliberately: the API is stateless and even load is worth more than sticky
+  # SSE reconnects. This is the knob to reach for if stream churn ever shows up in the SLO.
+  sessionAffinity: None
+  selector:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nexus-api
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # A count rather than a percentage: with 3 replicas a percentage rounds in ways that
+  # surprise people during scale-down. 2-of-3 keeps a quorum of serving capacity through a
+  # node drain or cluster upgrade while still letting the drain make progress.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/instance: nexus
+      app.kubernetes.io/component: api

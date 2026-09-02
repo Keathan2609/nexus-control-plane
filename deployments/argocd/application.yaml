@@ -1,0 +1,174 @@
+# NEXUS reconciled by Argo CD - the control plane managing its own deployment through the
+# same GitOps discipline it gives its users.
+#
+# The four OpenGitOps principles, concretely:
+#   declarative              - the Helm chart in this repo is the whole definition
+#   versioned and immutable  - targetRevision pins a tag; images pin an immutable version
+#   pulled automatically     - Argo pulls, nothing pushes into the cluster from CI
+#   continuously reconciled  - selfHeal reverts manual drift rather than tolerating it
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nexus-prod
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus-prod
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # Argo CD reads this to decide which URL to show in the UI and in notifications.
+    link.argocd.argoproj.io/external-link: https://nexus.example.com
+  finalizers:
+    # Cascade deletion: removing this Application removes the workloads it created. Without
+    # the finalizer, deleting the Application orphans everything in the namespace and you
+    # are left cleaning up by hand with no record of what belonged to it.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: nexus
+
+  source:
+    repoURL: https://github.com/Keathan2609/nexus.git
+    # A tag, not a branch. Pointing at HEAD of main means the cluster changes whenever
+    # somebody merges, and "what was running at 14:20" becomes unanswerable. Promotion is
+    # an explicit commit that moves this string - which is also what makes rollback a
+    # one-line revert with a full audit trail.
+    targetRevision: v0.1.0
+    path: deployments/helm/nexus
+
+    helm:
+      releaseName: nexus
+      # Fail the render rather than silently ignoring a value whose path no longer exists.
+      # Without this, renaming a value in the chart turns every override in this file into
+      # a no-op and the cluster quietly reverts to chart defaults.
+      ignoreMissingValueFiles: false
+
+      valuesObject:
+        config:
+          environment: production
+          logLevel: info
+
+        # secrets.create stays false. Credentials never enter Git, so they never enter this
+        # Application. `nexus-secrets` is materialised in-cluster by External Secrets
+        # Operator from the platform's secret manager; the AppProject's orphanedResources
+        # ignore list stops Argo from reporting it as unmanaged drift.
+        secrets:
+          create: false
+          existingSecret: nexus-secrets
+
+        # Managed PostgreSQL. The bundled StatefulSet has no backups or failover and has no
+        # business holding the system of record in production.
+        postgresql:
+          enabled: false
+        nats:
+          enabled: true
+          replicaCount: 3
+
+        api:
+          replicaCount: 3
+          autoscaling:
+            enabled: true
+            minReplicas: 3
+            maxReplicas: 12
+        worker:
+          replicaCount: 4
+          concurrency: 8
+        web:
+          replicaCount: 2
+
+        ingress:
+          enabled: true
+          className: nginx
+          host: nexus.example.com
+          tls:
+            enabled: true
+            secretName: nexus-tls
+
+        networkPolicy:
+          enabled: true
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nexus
+
+  syncPolicy:
+    automated:
+      # Delete objects removed from Git. Without prune, deleting a manifest leaves the
+      # object running forever and Git stops being an accurate description of the cluster -
+      # which is the entire premise of GitOps.
+      prune: true
+      # Revert manual changes. Someone kubectl-edits a replica count during an incident;
+      # selfHeal puts it back and forces the fix to go through Git. Occasionally annoying
+      # mid-incident, and worth it - undocumented drift is how clusters become unrebuildable.
+      selfHeal: true
+      # Do not prune when the diff is "Git returned nothing". A bad targetRevision or a
+      # transient repo failure should never be interpreted as "the user deleted everything".
+      allowEmpty: false
+
+    syncOptions:
+      - CreateNamespace=true
+      # Apply the Pod Security Standard labels from the chart's namespace metadata onto the
+      # namespace Argo creates. Without this, CreateNamespace=true makes a bare namespace
+      # with no PSA enforcement.
+      - ServerSideApply=true
+      # Prune last, after the new objects are healthy. On a rename this is the difference
+      # between a brief overlap and a gap with nothing serving.
+      - PruneLast=true
+      # Do not let a failed prune of one object abort the whole sync.
+      - PrunePropagationPolicy=foreground
+      - RespectIgnoreDifferences=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 10m
+
+  # ---------------------------------------------------------------------------------------
+  # Sync waves
+  #
+  # Declared as annotations on the chart templates, not here - Argo reads
+  # argocd.argoproj.io/sync-wave off each rendered object. Restated for reference:
+  #
+  #   -5  ServiceAccounts, ConfigMap, Secret, NetworkPolicies
+  #   -3  PostgreSQL / NATS (when bundled)
+  #   -1  schema migration Job
+  #    0  API Deployment, Service, PDB, HPA
+  #    1  worker and reconciler
+  #    2  web console, Ingress
+  #
+  # Argo waits for every object in a wave to report Healthy before starting the next, which
+  # is what makes the ordering real rather than decorative. The payoff: the API never starts
+  # against a database that has not been scheduled or a schema that has not been migrated,
+  # so a first install does not spend five minutes in CrashLoopBackOff while the operator
+  # wonders whether it is broken or merely early.
+  # ---------------------------------------------------------------------------------------
+
+  ignoreDifferences:
+    # The HPA owns replicas at runtime. Without this, Argo sees live replicas != chart
+    # replicas, marks the app OutOfSync, and selfHeal scales it back down - fighting the
+    # autoscaler on a loop. This is the single most common way a working HPA gets broken by
+    # GitOps.
+    - group: apps
+      kind: Deployment
+      name: nexus-api
+      jsonPointers:
+        - /spec/replicas
+    - group: apps
+      kind: Deployment
+      name: nexus-worker
+      jsonPointers:
+        - /spec/replicas
+    - group: apps
+      kind: Deployment
+      name: nexus-web
+      jsonPointers:
+        - /spec/replicas
+    # Service accounts get a token secret appended by the control plane on older clusters.
+    - group: ""
+      kind: ServiceAccount
+      jsonPointers:
+        - /secrets
+
+  revisionHistoryLimit: 10

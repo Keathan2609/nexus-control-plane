@@ -1,0 +1,522 @@
+# Default values for the NEXUS chart.
+#
+# Defaults are chosen to be safe rather than convenient: no credentials are embedded, the
+# system of record is assumed to be an external managed database, and a fresh
+# `helm install` with no overrides will refuse to start until you have created a Secret.
+# That is deliberate. A chart that comes up out of the box with a default password is a
+# chart that eventually ships a default password to production.
+
+# -- Registry prefix applied to every image, for mirrors and air-gapped installs.
+# Leave empty to use the repository values verbatim.
+global:
+  imageRegistry: ""
+  # Pull secrets for private registries. GHCR packages that are not public need one.
+  imagePullSecrets: []
+  #  - name: ghcr-pull
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------------------
+# Shared application configuration (non-secret). Rendered into a single ConfigMap that all
+# four workloads consume via envFrom, so there is one place to change log level or
+# environment rather than four.
+# ---------------------------------------------------------------------------------------
+config:
+  # NEXUS_LOG_LEVEL
+  logLevel: info
+  # NEXUS_ENVIRONMENT - surfaced in logs, metrics labels and the console banner.
+  environment: production
+  # NEXUS_HTTP_ADDR / NEXUS_METRICS_ADDR. Changing these means changing containerPort and
+  # the probes too; they are values mostly so an operator can move ports off a conflicting
+  # sidecar, not because they are expected to change.
+  httpAddr: ":8080"
+  metricsAddr: ":9090"
+  # NEXUS_OTEL_ENDPOINT. Empty disables OTLP export.
+  otelEndpoint: "http://otel-collector.observability.svc.cluster.local:4317"
+  # Extra NEXUS_* variables that do not warrant a first-class value. Merged into the
+  # ConfigMap as-is.
+  extraEnv: {}
+  #  NEXUS_FEATURE_PREVIEW_ENVS: "true"
+
+# ---------------------------------------------------------------------------------------
+# Secrets.
+#
+# create=false by default. The chart references an externally-managed Secret and the
+# recommended path is External Secrets Operator, Sealed Secrets, or an out-of-band
+# `kubectl create secret`. Setting create=true and passing values on the command line is
+# supported for local development, but note that --set values end up in the Helm release
+# secret in plain text and in your shell history.
+# ---------------------------------------------------------------------------------------
+secrets:
+  create: false
+  # Name of a pre-existing Secret holding NEXUS_DATABASE_URL, NEXUS_AUTH_JWT_SECRET and
+  # NEXUS_WEBHOOK_SECRET. Used when create=false.
+  existingSecret: "nexus-secrets"
+  # Only read when create=true. All three are required in that case - the template fails
+  # the render rather than producing a Secret with empty values, because an empty JWT
+  # signing key is worse than no deployment.
+  databaseUrl: ""
+  jwtSecret: ""
+  webhookSecret: ""
+
+# ---------------------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------------------
+
+# In-cluster PostgreSQL 16. Off by default: this is the system of record, and a single
+# StatefulSet with an emptyDir-adjacent lifecycle is not where pipeline history belongs.
+# Enable for local/dev clusters; use a managed instance or an operator (CloudNativePG,
+# Crunchy) in production.
+postgresql:
+  enabled: false
+  image:
+    repository: postgres
+    tag: "16.10-alpine"
+    pullPolicy: IfNotPresent
+  auth:
+    database: nexus
+    username: nexus
+    # No password value here by design. The bundled StatefulSet reads its superuser
+    # password from this Secret, which you create out of band, same as the app secrets.
+    existingSecret: "nexus-postgresql"
+    secretKey: "postgres-password"
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# External PostgreSQL. Only used when postgresql.enabled=false. The DSN itself lives in the
+# Secret (NEXUS_DATABASE_URL) - this block exists for documentation and for the NOTES output.
+externalDatabase:
+  host: ""
+  port: 5432
+  database: nexus
+
+# In-cluster NATS 2.10 with JetStream. On by default, unlike PostgreSQL: the event bus is
+# replayable transport rather than the system of record, so losing it costs a reconnect and
+# a catch-up rather than data.
+nats:
+  enabled: true
+  image:
+    repository: nats
+    tag: "2.10.29-alpine"
+    pullPolicy: IfNotPresent
+  replicaCount: 3
+  jetstream:
+    enabled: true
+    fileStorageSize: 10Gi
+    memStorageSize: 1Gi
+  persistence:
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Used when nats.enabled=false. Point at your managed NATS/JetStream endpoint.
+  url: ""
+
+# ---------------------------------------------------------------------------------------
+# Schema migrations.
+#
+# Disabled by default. When enabled this renders a Job at sync-wave -1, so under Argo CD it
+# runs after the ConfigMap/Secret/dependencies and before the API Deployment - which is the
+# whole point of the wave ordering.
+#
+# `args` must match whatever entrypoint your nexus-api image actually exposes. It is a
+# value rather than a hardcoded command precisely because getting this wrong turns a deploy
+# into a CrashLoopBackOff that blocks the sync; confirm it against your image before
+# enabling this in an environment you care about.
+# ---------------------------------------------------------------------------------------
+migrations:
+  enabled: false
+  command: []
+  args:
+    - migrate
+    - up
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  # Keep finished Jobs around briefly for post-deploy inspection, then let the TTL
+  # controller clean them up so the namespace does not accumulate one per release.
+  ttlSecondsAfterFinished: 3600
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ---------------------------------------------------------------------------------------
+# Control plane API
+# ---------------------------------------------------------------------------------------
+api:
+  replicaCount: 3
+  image:
+    repository: ghcr.io/keathan2609/nexus-api
+    # Empty means "use .Chart.AppVersion". Either way it resolves to an immutable version
+    # string - the template rejects the tag `latest` outright.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # maxUnavailable 0: the API is what every pipeline and console tab talks to, so a rollout
+  # must never reduce serving capacity below the declared replica count.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  # 60s: long enough to drain in-flight requests and let SSE clients migrate, short enough
+  # that a stuck pod cannot stall a node drain.
+  terminationGracePeriodSeconds: 60
+  # Pause before the container stops accepting connections, so endpoint removal has
+  # propagated to kube-proxy and the ingress controller first. Prevents deploy-time 502s.
+  preStopSleepSeconds: 5
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    # Scale up fast, scale down slowly. An IDP sees bursty load when CI fires; shedding
+    # replicas eagerly right after a burst just means scaling up again a minute later.
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 30
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  service:
+    type: ClusterIP
+    port: 8080
+    metricsPort: 9090
+    annotations: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # ScheduleAnyway rather than DoNotSchedule so a single-zone or small cluster still
+  # schedules rather than sitting Pending.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+
+# ---------------------------------------------------------------------------------------
+# Pipeline worker
+# ---------------------------------------------------------------------------------------
+worker:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/keathan2609/nexus-worker
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # NEXUS_WORKER_CONCURRENCY. Pipeline jobs are IO-bound (git, registry, network), so a
+  # worker can carry more in-flight jobs than it has cores. Raise this together with the
+  # memory limit, not on its own.
+  concurrency: 8
+  # NEXUS_WORKER_LEASE_SECONDS. Must comfortably exceed the heartbeat interval and stay
+  # well below terminationGracePeriodSeconds, so a killed worker's jobs are reclaimed by a
+  # peer shortly after it is gone rather than sitting stranded for a quarter of an hour.
+  leaseSeconds: 60
+
+  # 900s (15 min). On SIGTERM the worker stops claiming and finishes what it holds. A
+  # pipeline job is somebody's build or deploy: killing it mid-flight burns CI minutes and
+  # can leave a half-pushed image, and the lease then has to expire before a peer retries.
+  # 15 minutes covers the long tail of normal jobs without letting a hung worker block a
+  # node drain forever. If your pipelines routinely run longer, raise this AND raise your
+  # node drain timeout to match, or the platform will kill the pod before Kubernetes does.
+  terminationGracePeriodSeconds: 900
+
+  # Disk-backed scratch for checkouts and build artefacts. Not tmpfs: tmpfs pages count
+  # against the memory limit, so a large clone would OOM the worker instead of just
+  # filling a directory.
+  workspace:
+    sizeLimit: 10Gi
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 80
+    # CPU is a poor proxy for queue pressure on an IO-bound worker. If you run KEDA or the
+    # Prometheus adapter, put a JetStream pending-messages metric here instead and let CPU
+    # be the backstop.
+    behavior:
+      scaleDown:
+        # Long window: scaling in a worker can interrupt a job, so we are conservative.
+        stabilizationWindowSeconds: 600
+      scaleUp:
+        stabilizationWindowSeconds: 60
+    extraMetrics: []
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+
+# ---------------------------------------------------------------------------------------
+# Reconciler
+#
+# There is no replicaCount here and no autoscaling block. That is not an oversight - see
+# the comment in templates/reconciler-deployment.yaml. This component is a singleton.
+# ---------------------------------------------------------------------------------------
+reconciler:
+  image:
+    repository: ghcr.io/keathan2609/nexus-reconciler
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Short: the loop works in idempotent ticks and the worst case for interrupting one is
+  # that the next tick redoes it. A long grace period here only widens the gap during the
+  # Recreate rollout, when there is no reconciler running at all.
+  terminationGracePeriodSeconds: 30
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ---------------------------------------------------------------------------------------
+# Web console (Next.js)
+# ---------------------------------------------------------------------------------------
+web:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/keathan2609/nexus-web
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+    targetMemoryUtilizationPercentage: 80
+    behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 300
+      scaleUp:
+        stabilizationWindowSeconds: 30
+
+  service:
+    type: ClusterIP
+    port: 3000
+    annotations: {}
+
+  # Next.js writes ISR output and image-optimizer results here at runtime. Without a
+  # writable mount, readOnlyRootFilesystem turns every optimized image into a 500.
+  cache:
+    sizeLimit: 512Mi
+
+  podSecurityContext:
+    runAsNonRoot: true
+    # 1000, not 65532: the upstream Node images run as uid 1000 and the built Next.js
+    # output is owned by that uid. A uid that does not own the app directory cannot read
+    # its own build.
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+
+# ---------------------------------------------------------------------------------------
+# Ingress
+#
+# One Ingress fronting both the console and the API. pathPrefix routing rather than two
+# hostnames so the browser treats them as same-origin - no CORS preflight on every API
+# call, and SSE works without credential-mode gymnastics.
+# ---------------------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    # SSE will sit open for the life of a pipeline run. The default 60s proxy read timeout
+    # cuts those streams and makes the console look broken; raise it wherever you terminate.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # SSE is unusable through a buffering proxy - events arrive in chunks at flush time
+    # instead of as they happen.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  host: nexus.example.com
+  apiPathPrefix: /api
+  tls:
+    enabled: false
+    secretName: nexus-tls
+
+# ---------------------------------------------------------------------------------------
+# NetworkPolicy
+#
+# Off by default because a policy that your CNI silently ignores is worse than no policy -
+# it reads as protection in review and provides none at runtime. Turn it on once you have
+# confirmed your CNI enforces NetworkPolicy, and verify with a deliberate connectivity test.
+# ---------------------------------------------------------------------------------------
+networkPolicy:
+  enabled: false
+  # Namespace of the ingress controller allowed to reach the API and console.
+  ingressControllerNamespace: ingress-nginx
+  # Namespace allowed to scrape :9090 on every NEXUS pod.
+  monitoringNamespace: monitoring
+  # Namespace running the OTLP collector.
+  observabilityNamespace: observability
+  # Allow control plane pods outbound TLS to the internet. Workers clone from SCM and push
+  # to registries, so this is usually required; RFC1918 and link-local are always excluded
+  # so it cannot become a path to the node metadata endpoint.
+  allowExternalEgress: true
+
+# ---------------------------------------------------------------------------------------
+# ServiceAccounts. One per component so RBAC can be narrowed per workload later without
+# widening it for everything at once.
+# ---------------------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  # Workload identity example (EKS):
+  #  eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/nexus-api
+
+# ---------------------------------------------------------------------------------------
+# Prometheus scrape annotations on every pod. Harmless if you use a ServiceMonitor instead.
+# ---------------------------------------------------------------------------------------
+metrics:
+  podAnnotations:
+    enabled: true

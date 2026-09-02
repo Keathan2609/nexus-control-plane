@@ -1,0 +1,303 @@
+# ---------------------------------------------------------------------------------------
+# Network policy for the nexus namespace.
+#
+# The shape of this is: deny everything at the namespace edge, then open the specific paths
+# the system actually uses. The rule that carries the most weight is `postgres-allow-control
+# -plane` further down - reaching the system of record is gated on a pod label, not on being
+# in the namespace, so a debug pod someone kubectl-runs here cannot open a psql session.
+#
+# NOTE: these are enforced only if your CNI implements NetworkPolicy (Calico, Cilium,
+# Antrea, AWS VPC CNI with policy enabled, ...). On a CNI that ignores them they apply
+# cleanly and protect nothing, which is the worst kind of false comfort - verify with a
+# deliberate connectivity test after rollout, do not assume.
+# ---------------------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Empty podSelector = every pod in the namespace. Ingress-only baseline: we deny all
+  # inbound by default and open paths below. Egress is deliberately NOT denied here -
+  # egress restrictions are attached per-component instead, so that adding a policy to one
+  # workload cannot accidentally black-hole another.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-allow-ingress
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # The console, server-side rendering against the API.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus
+              app.kubernetes.io/component: web
+        # The ingress controller, for browser traffic and inbound SCM webhooks. Adjust the
+        # namespace label to match your controller (ingress-nginx, traefik, envoy-gateway).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-allow-ingress
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/component: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Every NEXUS pod exposes /metrics on 9090. Opening this to the monitoring namespace only
+  # - not namespace-wide - keeps the metrics port from doubling as an in-namespace side
+  # channel between workloads.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-allow-control-plane
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # This is the important one.
+  #
+  # Only pods explicitly labelled nexus.dev/database-client=true may open a connection to
+  # PostgreSQL. Today that is exactly three workloads - api, worker, reconciler. The web
+  # console is not one of them and must go through the API, and neither is any ad-hoc
+  # `kubectl run` debug pod, which is the realistic threat this closes: a namespace with a
+  # DB password in a Secret is otherwise one shell away from full table access.
+  #
+  # Applies to an in-cluster PostgreSQL. If you run a managed database instead, this object
+  # matches nothing and the equivalent control is the egress policy below plus your cloud
+  # firewall / security group - do not leave both unconfigured and assume you are covered.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              nexus.dev/database-client: "true"
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nats-allow-control-plane
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: messaging
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              nexus.dev/nats-client: "true"
+      ports:
+        - protocol: TCP
+          port: 4222
+    # Cluster/gateway ports so NATS peers can form a mesh with each other.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+      ports:
+        - protocol: TCP
+          port: 6222
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-plane-egress
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Attaching any egress rule to a pod makes egress default-deny for it, so this list has to
+  # be complete or the component breaks in ways that look like DNS flakiness. Everything
+  # NEXUS control plane pods legitimately talk to is enumerated below.
+  podSelector:
+    matchLabels:
+      nexus.dev/database-client: "true"
+  policyTypes:
+    - Egress
+  egress:
+    # DNS. First rule for a reason: without it every other rule here is unreachable by name.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nats
+      ports:
+        - protocol: TCP
+          port: 4222
+    # OTLP to the collector in the observability namespace.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
+    # The internet, TLS only. Workers clone from GitHub/GitLab and push to registries, and
+    # the API calls SCM APIs, so a blanket internal-only egress policy would break the
+    # product. The `except` blocks are the point of this rule: RFC1918 space and the
+    # link-local range are carved out so "reach the internet" cannot be turned into "reach
+    # the node metadata endpoint at 169.254.169.254" or "port-scan the VPC" by a malicious
+    # pipeline definition. Anything in-cluster must match one of the explicit rules above.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-egress
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # The console gets DNS and the API. That is the entire list. This is the other half of
+  # keeping the database restricted to the control plane: even if the console container were
+  # compromised and handed the DSN, it has no route to port 5432.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/component: web
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus
+              app.kubernetes.io/component: api
+      ports:
+        - protocol: TCP
+          port: 8080

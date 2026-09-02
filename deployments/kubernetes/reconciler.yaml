@@ -1,0 +1,159 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-reconciler
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: reconciler
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Exactly one. The reconciler is a singleton control loop: it reaps expired job leases,
+  # detects drift and expires preview environments. Two copies would race - both would see
+  # the same expired lease and both would act on it, so a job could be handed to two workers
+  # or a preview environment torn down while a second loop is still reconciling it.
+  #
+  # The honest fix for that is leader election, which this component does not implement.
+  # Until it does, "replicas: 1 + Recreate" is the enforcement mechanism, and both halves
+  # matter: RollingUpdate would start the new pod before the old one exits and give us the
+  # exact overlap we are trying to avoid. Recreate accepts a few seconds of no reconciler -
+  # a control loop that is idle for ten seconds catches up on its next tick - in exchange
+  # for a hard guarantee that there is never more than one.
+  #
+  # Do not scale this up to "make it more available". It will not; it will corrupt state.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/instance: nexus
+      app.kubernetes.io/component: reconciler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus
+        app.kubernetes.io/instance: nexus
+        app.kubernetes.io/component: reconciler
+        app.kubernetes.io/part-of: nexus
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: kustomize
+        nexus.dev/database-client: "true"
+        nexus.dev/nats-client: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: nexus-reconciler
+      # The one component that reads live cluster state for drift detection, so it is the
+      # one component that keeps its projected token.
+      automountServiceAccountToken: true
+      # 30s. The reconciler works in short idempotent ticks; the worst case for interrupting
+      # one is that the next tick redoes it. It needs long enough to finish the current tick
+      # and close its database and JetStream connections cleanly, and no longer - a long
+      # grace period here just extends the single-instance gap during a Recreate rollout.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reconciler
+          image: ghcr.io/keathan2609/nexus-reconciler:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: nexus-config
+            - secretRef:
+                name: nexus-secrets
+          env:
+            - name: NEXUS_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            # Only /healthz is exposed, so readiness reuses it. With Recreate and a single
+            # replica this is what makes `kubectl rollout status` mean something.
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            # Small by design. This loop wakes up, runs a handful of queries, and sleeps.
+            # If it ever needs more than this, something has turned into a batch job and
+            # belongs in the worker instead.
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-reconciler-metrics
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: reconciler
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: reconciler
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

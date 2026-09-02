@@ -1,0 +1,34 @@
+# State is the record of what actually exists. It routinely contains rendered
+# secrets (DSNs, generated passwords) in plain text, so it never belongs in git
+# even for the local-only path.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform.tfstate.lock.info
+
+# Provider plugins and module caches: large, platform-specific, reproducible
+# from the lock file. The lock file itself (.terraform.lock.hcl) IS committed.
+.terraform/
+.terraform.d/
+
+# Real variable values. Anything ending in .tfvars is assumed to hold values
+# specific to one person's machine or one account, including credentials.
+*.tfvars
+*.tfvars.json
+
+# ...but the checked-in templates are the documentation for what to fill in,
+# so they are explicitly re-included.
+!*.tfvars.example
+!*.tfvars.json.example
+
+# Saved plans. A plan file embeds every value it resolved, secrets included.
+*.tfplan
+*.tfplan.*
+crash.log
+crash.*.log
+
+# Local overrides are by definition not shared.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

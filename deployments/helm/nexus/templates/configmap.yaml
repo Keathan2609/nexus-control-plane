@@ -1,0 +1,33 @@
+{{/*
+Non-secret configuration, consumed by every workload through envFrom. Anything that would
+be damaging to read out of `kubectl get cm -o yaml` belongs in the Secret, not here.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nexus.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "config") | nindent 4 }}
+  annotations:
+    # Wave -5, alongside ServiceAccounts: configuration must exist before the migration Job
+    # (-1) and the workloads (0+) that read it.
+    argocd.argoproj.io/sync-wave: "-5"
+data:
+  # Bind on all interfaces inside the pod network namespace. The pod is isolated by
+  # NetworkPolicy, so this is not the exposure that binding 0.0.0.0 would be on a VM.
+  NEXUS_HTTP_ADDR: {{ .Values.config.httpAddr | quote }}
+  NEXUS_METRICS_ADDR: {{ .Values.config.metricsAddr | quote }}
+  NEXUS_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  NEXUS_ENVIRONMENT: {{ .Values.config.environment | quote }}
+  NEXUS_NATS_URL: {{ include "nexus.natsUrl" . | quote }}
+  {{- with .Values.config.otelEndpoint }}
+  NEXUS_OTEL_ENDPOINT: {{ . | quote }}
+  {{- end }}
+  NEXUS_WORKER_CONCURRENCY: {{ .Values.worker.concurrency | quote }}
+  NEXUS_WORKER_LEASE_SECONDS: {{ .Values.worker.leaseSeconds | quote }}
+  {{- with .Values.config.extraEnv }}
+  {{- range $key, $value := . }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- end }}

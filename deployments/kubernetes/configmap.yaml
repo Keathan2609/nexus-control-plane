@@ -1,0 +1,32 @@
+# Non-secret configuration only. Anything that would be damaging to read out of
+# `kubectl get cm -o yaml` belongs in the Secret next door, not here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-config
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+data:
+  # Listen on all interfaces inside the pod netns. The pod is already isolated by
+  # NetworkPolicy, so binding 0.0.0.0 here is not the exposure it would be on a VM.
+  NEXUS_HTTP_ADDR: ":8080"
+  NEXUS_METRICS_ADDR: ":9090"
+  NEXUS_LOG_LEVEL: "info"
+  NEXUS_ENVIRONMENT: "production"
+  # In-cluster NATS. Point this at your managed endpoint if you disable the bundled
+  # StatefulSet; the scheme stays nats:// either way.
+  NEXUS_NATS_URL: "nats://nats.nexus.svc.cluster.local:4222"
+  NEXUS_OTEL_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+  # Concurrency is deliberately below the CPU limit's worth of parallelism: pipeline jobs
+  # are IO-heavy (git, registry, network) rather than CPU-heavy, so a worker can hold more
+  # in-flight jobs than it has cores without thrashing. Raise it with the memory limit.
+  NEXUS_WORKER_CONCURRENCY: "8"
+  # Lease must outlive the longest expected stall between heartbeats but stay well under
+  # terminationGracePeriodSeconds on the worker, so a killed pod's jobs are reclaimed by a
+  # peer shortly after it is gone rather than sitting stranded.
+  NEXUS_WORKER_LEASE_SECONDS: "60"

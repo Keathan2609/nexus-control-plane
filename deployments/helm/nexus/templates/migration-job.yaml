@@ -1,0 +1,78 @@
+{{- if .Values.migrations.enabled }}
+{{/*
+Schema migrations.
+
+Sync-wave -1: after config, credentials and the dependencies (waves -5 and -3), before the
+API at wave 0. Argo CD will not begin syncing wave 0 until this Job reports healthy, which
+is what stops the API from starting against a schema it does not understand. That ordering
+is the entire reason this object exists as a separate wave rather than an init container.
+
+Why a plain Job and not a Helm hook: Argo CD translates helm.sh/hook annotations into its
+own hook phases, which then interact with sync waves in ways that surprise people. Keeping
+this a normal resource with a wave means one ordering mechanism instead of two.
+
+Why the version is in the name: Job.spec is immutable after creation. A fixed name means the
+second `helm upgrade` fails with a field-immutable error, or Argo CD sits permanently
+OutOfSync trying to patch a field it cannot patch. Naming per release makes each upgrade
+create a new Job and lets the TTL controller clean up the old one.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nexus.fullname" . }}-migrate-{{ .Values.api.image.tag | default .Chart.AppVersion | replace "." "-" | replace "+" "-" | trunc 20 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "migration") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  # Hard ceiling so a migration that has taken a lock and stalled fails the sync instead of
+  # blocking the deployment pipeline indefinitely.
+  activeDeadlineSeconds: {{ .Values.migrations.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.migrations.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "nexus.componentLabels" (dict "root" $ "component" "migration") | nindent 8 }}
+        nexus.dev/database-client: "true"
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "nexus.serviceAccountName" (dict "root" $ "component" "api") }}
+      automountServiceAccountToken: false
+      {{- include "nexus.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.api.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          # Deliberately the API image, not a separate migration image: the schema and the
+          # code that reads it ship together, so they cannot drift apart between releases.
+          image: {{ include "nexus.image" (dict "root" $ "image" .Values.api.image) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          {{- with .Values.migrations.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.migrations.args }}
+          # Values-driven rather than hardcoded: this has to match the entrypoint your
+          # nexus-api image actually exposes. Getting it wrong turns a deploy into a Job
+          # that never succeeds and a sync that never completes, so confirm it against the
+          # image before enabling migrations in an environment you care about.
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          envFrom:
+            {{- include "nexus.envFrom" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.api.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+{{- end }}

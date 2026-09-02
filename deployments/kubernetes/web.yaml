@@ -1,0 +1,168 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-web
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  # Same reasoning as the API: the console is user-facing, so we never dip below the
+  # declared replica count during a rollout. It is cheaper to hold a surge pod than to
+  # explain a blank console during a deploy.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/instance: nexus
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus
+        app.kubernetes.io/instance: nexus
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: nexus
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: kustomize
+        # Note what is NOT here: nexus.dev/database-client. The console reaches the system
+        # of record only through the API, and the NetworkPolicy enforces that rather than
+        # trusting the frontend to behave.
+    spec:
+      serviceAccountName: nexus-web
+      automountServiceAccountToken: false
+      # 30s. Plain HTTP request/response with no long-lived streams of its own - the console
+      # opens SSE against the API, not against this process - so a short drain is enough.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        # 1000 rather than 65532: the upstream Node images run as uid 1000 and the built
+        # Next.js output is owned by that uid. Running as a uid that does not own the app
+        # directory means the server cannot read its own build.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus
+              app.kubernetes.io/component: web
+      containers:
+        - name: web
+          image: ghcr.io/keathan2609/nexus-web:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            # Server-side calls go straight to the API Service - in-cluster, no ingress hop.
+            - name: NEXUS_API_URL
+              value: "http://nexus-api.nexus.svc.cluster.local:8080"
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+          # Next.js does not ship a dedicated health endpoint, so the probes hit the app
+          # root. That is a slightly heavier check than a purpose-built /healthz, hence the
+          # longer timeouts - if the console ever grows an /api/health route, point these
+          # at it and tighten the numbers back up.
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          resources:
+            # Node is memory-hungry and largely single-threaded per request. The memory
+            # limit is the one that actually matters here; the CPU limit mostly bounds
+            # render bursts on cold pages.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: next-cache
+              mountPath: /app/.next/cache
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        # Next.js writes ISR output and image-optimizer results under .next/cache at
+        # runtime. Without a writable mount here, readOnlyRootFilesystem turns every
+        # optimized image request into a 500. Per-pod and ephemeral is fine - a cold cache
+        # costs latency on first render, not correctness.
+        - name: next-cache
+          emptyDir:
+            sizeLimit: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-web
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,108 @@
+NEXUS {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Components:
+  api          {{ include "nexus.image" (dict "root" $ "image" .Values.api.image) }}
+  worker       {{ include "nexus.image" (dict "root" $ "image" .Values.worker.image) }}
+  reconciler   {{ include "nexus.image" (dict "root" $ "image" .Values.reconciler.image) }}   (singleton)
+  web          {{ include "nexus.image" (dict "root" $ "image" .Values.web.image) }}
+
+{{- if not .Values.secrets.create }}
+
+  ACTION REQUIRED - credentials
+  ------------------------------------------------------------------------------------
+  This release expects a pre-existing Secret named "{{ .Values.secrets.existingSecret }}".
+  Every pod will stay in CrashLoopBackOff until it exists. Check with:
+
+    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.existingSecret }}
+
+  If it does not exist yet, the recommended path is External Secrets Operator or Sealed
+  Secrets. For a quick non-production bootstrap:
+
+    kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.secrets.existingSecret }} \
+      --from-literal=NEXUS_DATABASE_URL='postgres://user:pass@host:5432/nexus?sslmode=require' \
+      --from-literal=NEXUS_AUTH_JWT_SECRET="$(openssl rand -base64 48)" \
+      --from-literal=NEXUS_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+{{- end }}
+
+{{- if .Values.secrets.create }}
+
+  NOTE - credentials are in the release
+  ------------------------------------------------------------------------------------
+  secrets.create=true, so the values you passed are stored in the Helm release Secret in
+  plain text, and are likely in your shell history and CI logs too. That is fine for a
+  laptop cluster and not fine for anything shared. Switch to secrets.create=false with an
+  externally managed Secret before this reaches a real environment.
+{{- end }}
+
+{{- if not .Values.postgresql.enabled }}
+
+  Database: external (postgresql.enabled=false).
+  The DSN comes from NEXUS_DATABASE_URL in the Secret above. Nothing in this chart
+  provisions or backs up your database.
+{{- else }}
+
+  Database: bundled StatefulSet (postgresql.enabled=true).
+  No backups, no PITR, no failover. This is an evaluation setup - move to a managed
+  instance or an operator before storing anything you would miss.
+{{- end }}
+
+{{- if .Values.nats.enabled }}
+  Events: bundled NATS, {{ .Values.nats.replicaCount }} replica(s), JetStream {{ if .Values.nats.jetstream.enabled }}enabled{{ else }}DISABLED{{ end }}.
+  {{- if eq (int .Values.nats.replicaCount) 2 }}
+
+  WARNING: nats.replicaCount=2 cannot form a quorum. JetStream needs an odd number -
+  use 1 or 3. Two replicas is strictly worse than one.
+  {{- end }}
+{{- else }}
+  Events: external NATS at {{ .Values.nats.url }}
+{{- end }}
+
+{{- if .Values.migrations.enabled }}
+
+  Migrations run as a Job at sync-wave -1 (before the API). Watch it with:
+    kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=migration --tail=100
+{{- else }}
+
+  Migrations are DISABLED (migrations.enabled=false). If your database schema is not
+  managed elsewhere, the API will fail against an empty or stale schema. Confirm the
+  migrate entrypoint your nexus-api image exposes, set migrations.args to match, then
+  enable it.
+{{- end }}
+
+Check the rollout:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/part-of=nexus
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "nexus.fullname" . }}-api
+
+Reach the console:
+{{- if .Values.ingress.enabled }}
+
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+  {{- if not .Values.ingress.tls.enabled }}
+
+  NOTE: TLS is off. The console sends a session JWT on every request - do not expose this
+  over plaintext HTTP outside a trusted network.
+  {{- end }}
+{{- else }}
+
+  No Ingress (ingress.enabled=false). Port-forward instead:
+
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "nexus.fullname" . }}-web {{ .Values.web.service.port }}:{{ .Values.web.service.port }}
+    open http://localhost:{{ .Values.web.service.port }}
+{{- end }}
+
+{{- if not .Values.networkPolicy.enabled }}
+
+  NetworkPolicy is disabled. Nothing restricts which pods in this namespace can reach the
+  database. Once you have confirmed your CNI enforces NetworkPolicy, set
+  networkPolicy.enabled=true and verify with a deliberate connectivity test - a policy your
+  CNI silently ignores reads as protection in review and provides none at runtime.
+{{- end }}
+
+{{- if and .Values.worker.autoscaling.enabled (gt (int .Values.worker.terminationGracePeriodSeconds) 300) }}
+
+  Heads up: worker autoscaling is on with a {{ .Values.worker.terminationGracePeriodSeconds }}s termination grace period.
+  Every scale-down commits a pod for up to that long while it drains an in-flight job.
+  Make sure the HPA scaleDown stabilization window is comfortably larger, or the autoscaler
+  will keep issuing scale decisions against pods that have not finished leaving yet.
+{{- end }}

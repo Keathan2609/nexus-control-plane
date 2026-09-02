@@ -1,0 +1,103 @@
+version: 2
+updates:
+  # Go module dependency updates
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - go
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
+    reviewers:
+      - keathan2609
+    allow:
+      - dependency-type: "all"
+    ignore: []
+
+  # npm dependency updates in web/
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "03:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - npm
+      - frontend
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
+    reviewers:
+      - keathan2609
+    # Security updates should be applied immediately
+    allow:
+      - dependency-type: "all"
+    # Group similar dependencies for easier review
+    groups:
+      security:
+        dependency-type: "security"
+        update-types:
+          - "patch"
+          - "minor"
+      development:
+        dependency-type: "dev"
+      production:
+        dependency-type: "production"
+
+  # GitHub Actions updates
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "03:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+      - automation
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
+    reviewers:
+      - keathan2609
+    # Pin to exact versions for reproducibility
+    allow:
+      - dependency-type: "all"
+
+  # Docker image updates
+  - package-ecosystem: docker
+    directory: "/deployments/docker"
+    schedule:
+      interval: weekly
+      day: thursday
+      time: "03:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - docker
+      - container
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    pull-request-branch-name:
+      separator: "/"
+    reviewers:
+      - keathan2609
+    # Security updates should be applied immediately
+    allow:
+      - dependency-type: "all"

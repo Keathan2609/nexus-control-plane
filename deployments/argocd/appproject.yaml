@@ -1,0 +1,109 @@
+# AppProject: the blast-radius boundary for everything NEXUS deploys.
+#
+# Argo CD's `default` project allows any source repo, any destination cluster and any
+# resource kind. That is fine for a demo and wrong for a control plane that can create
+# workloads - NEXUS is an IDP, so an Application under a permissive project is effectively
+# an escalation path. This project answers three questions explicitly: which repos may be
+# synced from, which namespaces may be written to, and which kinds may be created at all.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: nexus
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: argocd
+  finalizers:
+    # Without this, deleting the AppProject leaves orphaned Applications that reference a
+    # project that no longer exists - they stop syncing and are confusing to clean up.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: NEXUS control plane - self-managed via GitOps
+
+  # Exactly one repository. Not "*". If someone points a NEXUS Application at a fork or a
+  # personal repo, the sync fails loudly instead of quietly deploying unreviewed manifests.
+  sourceRepos:
+    - https://github.com/Keathan2609/nexus.git
+
+  destinations:
+    - name: in-cluster
+      server: https://kubernetes.default.svc
+      namespace: nexus
+    # Preview environments. NEXUS creates ephemeral namespaces for PR previews, so the
+    # project has to permit them - scoped by prefix rather than opened to '*' so a bug in
+    # namespace naming cannot let a preview land in kube-system.
+    - name: in-cluster
+      server: https://kubernetes.default.svc
+      namespace: nexus-preview-*
+
+  # Cluster-scoped resources this project may manage. Deliberately short: the chart itself
+  # creates none of these, and the Namespace entry exists only for CreateNamespace=true.
+  # Anything absent here - ClusterRole, ClusterRoleBinding, CRDs, ValidatingWebhook - is
+  # denied, which is what stops a chart change from quietly granting itself cluster-admin.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  # Namespaced resources: allow-all, then subtract. The blacklist is the interesting part.
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceBlacklist:
+    # RBAC objects are excluded so a change to the NEXUS chart can never widen its own
+    # permissions. Granting NEXUS a new Role is a deliberate act performed by whoever
+    # manages the platform's RBAC, through a different Application in a different project.
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+    # ResourceQuota and LimitRange belong to whoever governs the cluster's capacity, not to
+    # the tenant that consumes it. Letting an app raise its own quota defeats the quota.
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+
+  orphanedResources:
+    # Warn, do not prune. Flags anything living in the namespace that Git does not know
+    # about - useful for spotting manual kubectl edits - without automatically deleting
+    # things it does not recognise, which is how you lose a manually created Secret.
+    warn: true
+    ignore:
+      # The credential Secret is intentionally not in Git. Do not report it as orphaned.
+      - group: ""
+        kind: Secret
+        name: nexus-secrets
+
+  # Who may do what to Applications in this project. Sync is separated from update: an
+  # on-call engineer needs to be able to trigger a sync at 3am without being able to
+  # rewrite the Application spec.
+  roles:
+    - name: platform-admin
+      description: Full control over NEXUS applications
+      policies:
+        - p, proj:nexus:platform-admin, applications, *, nexus/*, allow
+      groups:
+        - nexus:platform-team
+    - name: operator
+      description: Can sync and inspect, cannot change the Application definition
+      policies:
+        - p, proj:nexus:operator, applications, get, nexus/*, allow
+        - p, proj:nexus:operator, applications, sync, nexus/*, allow
+        - p, proj:nexus:operator, applications, action/*, nexus/*, allow
+        # Explicitly denied: override lets you sync arbitrary manifests that are not in
+        # Git, which would route around code review entirely.
+        - p, proj:nexus:operator, applications, override, nexus/*, deny
+      groups:
+        - nexus:oncall
+
+  # Keep production syncs out of the hours when nobody is around to notice a bad one.
+  # Cron is in UTC. Manual syncs are unaffected - this only gates automated sync.
+  syncWindows:
+    - kind: deny
+      schedule: "0 22 * * *"
+      duration: 10h
+      applications:
+        - nexus-prod
+      manualSync: true
+      timeZone: UTC

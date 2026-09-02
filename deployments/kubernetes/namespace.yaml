@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/managed-by: kustomize
+    # Pod Security Admission is enforced at the namespace edge rather than relying on
+    # every author remembering to harden their own pod spec. "restricted" is the strictest
+    # built-in profile; every workload here is written to satisfy it, so a future manifest
+    # that forgets runAsNonRoot gets rejected at admission instead of quietly running as root.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

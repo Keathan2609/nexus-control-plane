@@ -1,0 +1,538 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "NEXUS Helm chart values",
+  "description": "Validated at install/upgrade/lint time. Two things are enforced here that are not merely type checks: the container securityContext hardening cannot be weakened through values, and the reconciler block rejects replicaCount outright because that component is a singleton.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["config", "secrets", "api", "worker", "reconciler", "web"],
+
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": {
+          "type": "string",
+          "description": "Empty falls back to .Chart.AppVersion. 'latest' is rejected by the template: a mutable tag makes incidents unreproducible and rollbacks meaningless.",
+          "not": { "const": "latest" }
+        },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Requests AND limits are required on every workload. Requests drive scheduling and bin packing; limits cap the blast radius of one bad pod.",
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": { "type": ["string", "number"] },
+            "memory": { "type": ["string", "number"] }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory"],
+          "properties": {
+            "cpu": { "type": ["string", "number"] },
+            "memory": { "type": ["string", "number"] }
+          }
+        }
+      }
+    },
+
+    "podSecurityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runAsNonRoot", "runAsUser", "seccompProfile"],
+      "properties": {
+        "runAsNonRoot": {
+          "const": true,
+          "description": "Pinned to true. Not a preference - the namespace enforces the restricted Pod Security Standard, so a pod that sets this false is rejected at admission anyway. Failing here gives a readable error instead of an admission webhook message."
+        },
+        "runAsUser": { "type": "integer", "minimum": 1, "description": "Must be non-zero; 0 is root and contradicts runAsNonRoot." },
+        "runAsGroup": { "type": "integer", "minimum": 1 },
+        "fsGroup": { "type": "integer", "minimum": 1 },
+        "seccompProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "enum": ["RuntimeDefault", "Localhost"],
+              "description": "Unconfined is deliberately not an option here."
+            },
+            "localhostProfile": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "containerSecurityContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowPrivilegeEscalation", "readOnlyRootFilesystem", "runAsNonRoot", "capabilities", "seccompProfile"],
+      "properties": {
+        "allowPrivilegeEscalation": { "const": false },
+        "readOnlyRootFilesystem": {
+          "const": true,
+          "description": "Pinned. Every container in this chart has an explicit emptyDir for the paths it genuinely needs to write; if a new one needs more, add a mount rather than unlocking the root filesystem."
+        },
+        "runAsNonRoot": { "const": true },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["drop"],
+          "properties": {
+            "drop": {
+              "type": "array",
+              "items": { "type": "string" },
+              "contains": { "const": "ALL" },
+              "description": "Must include ALL. Nothing here binds a privileged port or manipulates the network stack."
+            },
+            "add": {
+              "type": "array",
+              "items": { "type": "string" },
+              "maxItems": 0,
+              "description": "Empty by design. Adding a capability back is a decision that should require editing this schema, not just a values file."
+            }
+          }
+        },
+        "seccompProfile": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["RuntimeDefault", "Localhost"] },
+            "localhostProfile": { "type": "string" }
+          }
+        }
+      }
+    },
+
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 },
+        "targetMemoryUtilizationPercentage": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 },
+        "behavior": { "type": "object" },
+        "extraMetrics": { "type": "array" }
+      }
+    },
+
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["RollingUpdate", "Recreate"] },
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxUnavailable": { "type": ["integer", "string"] },
+            "maxSurge": { "type": ["integer", "string"] }
+          }
+        }
+      }
+    },
+
+    "topologySpreadConstraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxSkew", "topologyKey", "whenUnsatisfiable"],
+        "properties": {
+          "maxSkew": { "type": "integer", "minimum": 1 },
+          "topologyKey": { "type": "string" },
+          "whenUnsatisfiable": { "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+        }
+      },
+      "description": "labelSelector is injected by the template from the component labels, so it is not accepted here - hand-writing it is how you end up with a constraint that silently matches every pod in the namespace."
+    },
+
+    "scheduling": {
+      "nodeSelector": { "type": "object" },
+      "tolerations": { "type": "array" },
+      "affinity": { "type": "object" },
+      "podAnnotations": { "type": "object" },
+      "podLabels": { "type": "object" }
+    }
+  },
+
+  "properties": {
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "imageRegistry": { "type": "string" },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": { "name": { "type": "string" } }
+          }
+        }
+      }
+    },
+
+    "nameOverride": { "type": "string", "maxLength": 40 },
+    "fullnameOverride": { "type": "string", "maxLength": 40 },
+
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logLevel", "environment", "httpAddr", "metricsAddr"],
+      "properties": {
+        "logLevel": { "enum": ["debug", "info", "warn", "error"] },
+        "environment": { "type": "string", "minLength": 1 },
+        "httpAddr": { "type": "string", "pattern": "^[^:]*:[0-9]+$" },
+        "metricsAddr": { "type": "string", "pattern": "^[^:]*:[0-9]+$" },
+        "otelEndpoint": { "type": "string" },
+        "extraEnv": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean"] }
+        }
+      }
+    },
+
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create"],
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "description": "false (the default) references an externally managed Secret. true renders one from the values below, which then live in the Helm release object in plain text - development only."
+        },
+        "existingSecret": { "type": "string" },
+        "databaseUrl": { "type": "string" },
+        "jwtSecret": { "type": "string" },
+        "webhookSecret": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "create": { "const": false } }, "required": ["create"] },
+          "then": {
+            "properties": { "existingSecret": { "type": "string", "minLength": 1 } },
+            "required": ["existingSecret"],
+            "description": "With create=false there must be a Secret to point at, or nothing can start."
+          }
+        },
+        {
+          "if": { "properties": { "create": { "const": true } }, "required": ["create"] },
+          "then": {
+            "properties": {
+              "databaseUrl": { "type": "string", "minLength": 1 },
+              "jwtSecret": { "type": "string", "minLength": 32 },
+              "webhookSecret": { "type": "string", "minLength": 16 }
+            },
+            "required": ["databaseUrl", "jwtSecret", "webhookSecret"],
+            "description": "Minimum lengths are a floor against obviously weak keys, not a strength check. Generate them with a CSPRNG: openssl rand -base64 48."
+          }
+        }
+      ]
+    },
+
+    "postgresql": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["database", "username", "existingSecret", "secretKey"],
+          "properties": {
+            "database": { "type": "string", "minLength": 1 },
+            "username": { "type": "string", "minLength": 1 },
+            "existingSecret": { "type": "string", "minLength": 1 },
+            "secretKey": { "type": "string", "minLength": 1 }
+          },
+          "description": "No password property exists here on purpose. There is no way to put a database password in a values file through this schema."
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string" },
+            "storageClass": { "type": "string" }
+          }
+        },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+
+    "externalDatabase": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "database": { "type": "string" }
+      }
+    },
+
+    "nats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "replicaCount": {
+          "type": "integer",
+          "minimum": 1,
+          "not": { "const": 2 },
+          "description": "JetStream needs a quorum, so use an odd number. 2 is rejected outright: two replicas cannot form a majority and are strictly worse than one."
+        },
+        "jetstream": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "fileStorageSize": { "type": "string" },
+            "memStorageSize": { "type": "string" }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "storageClass": { "type": "string" } }
+        },
+        "resources": { "$ref": "#/definitions/resources" },
+        "url": { "type": "string" }
+      },
+      "if": { "properties": { "enabled": { "const": false } }, "required": ["enabled"] },
+      "then": {
+        "properties": { "url": { "type": "string", "pattern": "^nats://" } },
+        "required": ["url"]
+      }
+    },
+
+    "migrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "command": { "type": "array", "items": { "type": "string" } },
+        "args": { "type": "array", "items": { "type": "string" } },
+        "backoffLimit": { "type": "integer", "minimum": 0 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 1 },
+        "ttlSecondsAfterFinished": { "type": "integer", "minimum": 0 },
+        "resources": { "$ref": "#/definitions/resources" }
+      }
+    },
+
+    "api": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "resources", "podSecurityContext", "securityContext", "terminationGracePeriodSeconds"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "strategy": { "$ref": "#/definitions/strategy" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "preStopSleepSeconds": { "type": "integer", "minimum": 0, "maximum": 60 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "autoscaling": { "$ref": "#/definitions/autoscaling" },
+        "podDisruptionBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": ["integer", "string"] }
+          }
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "annotations": { "type": "object" }
+          }
+        },
+        "podSecurityContext": { "$ref": "#/definitions/podSecurityContext" },
+        "securityContext": { "$ref": "#/definitions/containerSecurityContext" },
+        "topologySpreadConstraints": { "$ref": "#/definitions/topologySpreadConstraints" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" }
+      }
+    },
+
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "resources", "podSecurityContext", "securityContext", "terminationGracePeriodSeconds", "leaseSeconds"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "leaseSeconds": { "type": "integer", "minimum": 10 },
+        "terminationGracePeriodSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600,
+          "description": "Must exceed leaseSeconds (the template enforces the relationship). Long enough to finish an in-flight pipeline job, bounded so a hung worker cannot block a node drain forever."
+        },
+        "workspace": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "sizeLimit": { "type": "string" } }
+        },
+        "resources": { "$ref": "#/definitions/resources" },
+        "autoscaling": { "$ref": "#/definitions/autoscaling" },
+        "podSecurityContext": { "$ref": "#/definitions/podSecurityContext" },
+        "securityContext": { "$ref": "#/definitions/containerSecurityContext" },
+        "topologySpreadConstraints": { "$ref": "#/definitions/topologySpreadConstraints" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" }
+      }
+    },
+
+    "reconciler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "resources", "podSecurityContext", "securityContext", "terminationGracePeriodSeconds"],
+      "description": "Note the absence of replicaCount, strategy and autoscaling. additionalProperties:false makes setting any of them a hard validation error rather than a silently ignored value - this component is a singleton control loop and running two copies races on lease reaping and preview-environment expiry.",
+      "properties": {
+        "image": { "$ref": "#/definitions/image" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "podSecurityContext": { "$ref": "#/definitions/podSecurityContext" },
+        "securityContext": { "$ref": "#/definitions/containerSecurityContext" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" }
+      }
+    },
+
+    "web": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "resources", "podSecurityContext", "securityContext", "terminationGracePeriodSeconds"],
+      "properties": {
+        "replicaCount": { "type": "integer", "minimum": 1 },
+        "image": { "$ref": "#/definitions/image" },
+        "strategy": { "$ref": "#/definitions/strategy" },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
+        "preStopSleepSeconds": { "type": "integer", "minimum": 0, "maximum": 60 },
+        "resources": { "$ref": "#/definitions/resources" },
+        "autoscaling": { "$ref": "#/definitions/autoscaling" },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "annotations": { "type": "object" }
+          }
+        },
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "sizeLimit": { "type": "string" } }
+        },
+        "podSecurityContext": { "$ref": "#/definitions/podSecurityContext" },
+        "securityContext": { "$ref": "#/definitions/containerSecurityContext" },
+        "topologySpreadConstraints": { "$ref": "#/definitions/topologySpreadConstraints" },
+        "nodeSelector": { "type": "object" },
+        "tolerations": { "type": "array" },
+        "affinity": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "podLabels": { "type": "object" }
+      }
+    },
+
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "host": { "type": "string" },
+        "apiPathPrefix": { "type": "string", "pattern": "^/" },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": { "type": "string" }
+          }
+        }
+      },
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": {
+        "properties": { "host": { "type": "string", "minLength": 1 } },
+        "required": ["host"]
+      }
+    },
+
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ingressControllerNamespace": { "type": "string", "minLength": 1 },
+        "monitoringNamespace": { "type": "string", "minLength": 1 },
+        "observabilityNamespace": { "type": "string", "minLength": 1 },
+        "allowExternalEgress": { "type": "boolean" }
+      }
+    },
+
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "enabled": { "type": "boolean" } }
+        }
+      }
+    }
+  }
+}

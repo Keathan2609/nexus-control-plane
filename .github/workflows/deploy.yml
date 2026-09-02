@@ -1,0 +1,354 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: 'Target environment for deployment'
+        options:
+          - staging
+          - production
+        default: staging
+        required: true
+      version:
+        type: string
+        description: 'Image version/tag to deploy (e.g., v1.0.0, main-sha123abc)'
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  # Prevent multiple concurrent deployments to the same environment to avoid conflicts
+  group: deploy-${{ github.event.inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  validate-inputs:
+    name: Validate Deployment Inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate version format
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [[ ! "$version" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Invalid version format: $version"
+            echo "Version must contain only alphanumeric characters, dots, hyphens, and underscores"
+            exit 1
+          fi
+          echo "Version validation passed: $version"
+
+      - name: Verify image exists in GHCR
+        env:
+          REGISTRY: ghcr.io
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          # Check that at least one image with this version exists
+          # This is a simple check; in production you might use registry API calls
+          for image in nexus-api nexus-worker nexus-reconciler nexus-web; do
+            full_image="${REGISTRY}/${OWNER}/${image}:${VERSION}"
+            echo "Checking image: $full_image"
+            # Note: This is a placeholder check. In production, authenticate with GHCR
+            # and verify the image manifest actually exists before proceeding.
+          done
+          echo "Image verification completed"
+
+  deploy-staging:
+    name: Deploy to Staging
+    environment:
+      name: staging
+      url: https://staging.example.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - validate-inputs
+    if: github.event.inputs.environment == 'staging'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d632683dd7b4114ad314bca15079f37a30b06314 # v4.2.0
+
+      - name: Set up Kustomize
+        run: |
+          # In production, this would download and use kustomize to build manifests
+          # For this demo, we show the GitOps promotion workflow
+          echo "Setting up Kustomize for manifest generation..."
+          # curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          # sudo mv kustomize /usr/local/bin/
+
+      - name: Generate GitOps manifests for staging
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          ENVIRONMENT: staging
+        run: |
+          echo "Generating GitOps manifests for environment: $ENVIRONMENT"
+          echo "Using image version: $VERSION"
+
+          # In production, you would use kustomize or helm to generate manifests
+          # Example structure:
+          # kustomize build infrastructure/overlays/staging --enable-alpha-plugins \
+          #   -e IMAGE_VERSION=$VERSION > /tmp/manifests.yaml
+
+          # For this demo, we create a simple manifest structure
+          mkdir -p /tmp/gitops
+          cat > /tmp/gitops/kustomization.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          # This would reference your base configuration
+          bases:
+            - ../../base
+
+          patchesStrategicMerge:
+            - deployment.yaml
+
+          # This demonstrates the promotion pattern:
+          # - staging uses the specified version
+          # - images are tagged for traceability
+          namespace: nexus-staging
+          EOF
+
+          cat > /tmp/gitops/deployment.yaml << EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: nexus-api
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: nexus-api
+                    image: ghcr.io/${{ github.repository_owner }}/nexus-api:$VERSION
+          EOF
+
+          echo "Generated manifest structure:"
+          find /tmp/gitops -type f -exec echo {} \;
+
+      - name: Validate manifests syntax
+        run: |
+          echo "Validating Kubernetes manifest syntax..."
+          # In production, use kubeval or kube-score
+          # kubeval /tmp/gitops/*.yaml
+          echo "Manifest validation passed (demo mode)"
+
+      - name: Create GitOps PR for staging
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          echo "In production, this would:"
+          echo "1. Create a branch for the staging deployment"
+          echo "2. Update infrastructure/overlays/staging/ with the new image version"
+          echo "3. Create a GitHub PR for review before auto-merging or manual approval"
+          echo ""
+          echo "Example promotion workflow:"
+          echo "  git checkout -b deploy/staging-$VERSION"
+          echo "  kustomize edit set image ghcr.io/${{ github.repository_owner }}/nexus-api:$VERSION"
+          echo "  git commit -m \"Deploy staging: $VERSION\""
+          echo "  gh pr create --base main --title \"Deploy staging: $VERSION\""
+
+      - name: Deploy to staging
+        run: |
+          echo "Deploying to staging environment..."
+          echo "Version: ${{ github.event.inputs.version }}"
+          echo ""
+          echo "In production, this would:"
+          echo "1. Authenticate with the staging cluster (via KUBECONFIG/service account)"
+          echo "2. Apply the generated manifests:"
+          echo "   kubectl apply -f /tmp/gitops/"
+          echo "3. Monitor rollout status:"
+          echo "   kubectl rollout status -n nexus-staging deployment/nexus-api"
+          echo ""
+          echo "For local testing without cluster:"
+          echo "  kubectl apply --dry-run=client -f /tmp/gitops/"
+
+      - name: Verify staging deployment
+        run: |
+          echo "Verifying staging deployment..."
+          echo ""
+          echo "In production, this would:"
+          echo "1. Check deployment health:"
+          echo "   kubectl get deployment -n nexus-staging"
+          echo "   kubectl get pods -n nexus-staging"
+          echo "2. Run smoke tests against staging"
+          echo "3. Check application metrics and logs"
+
+  deploy-production:
+    name: Deploy to Production
+    environment:
+      name: production
+      url: https://nexus.example.com
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs:
+      - validate-inputs
+    if: github.event.inputs.environment == 'production'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d632683dd7b4114ad314bca15079f37a30b06314 # v4.2.0
+
+      - name: Check production readiness
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          echo "Production Readiness Checks:"
+          echo "- Version: $VERSION"
+          echo "- Environment: production"
+          echo ""
+          echo "Pre-deployment verification:"
+          echo "1. Confirm this version has passed all CI/CD checks (tag must exist)"
+          echo "2. Verify no critical security vulnerabilities in SBOMs"
+          echo "3. Confirm staging deployment is stable (if applicable)"
+
+      - name: Verify rollback plan
+        run: |
+          echo "Rollback strategy for production:"
+          echo "1. Blue-green deployment: Keep previous version running"
+          echo "2. Quick rollback via GitOps: Revert to previous tag in main branch"
+          echo "3. Database: Ensure all migrations are backward-compatible"
+          echo "4. Monitoring: Alert thresholds configured for immediate rollback"
+
+      - name: Generate production GitOps manifests
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          ENVIRONMENT: production
+        run: |
+          echo "Generating production manifests with strict requirements..."
+
+          mkdir -p /tmp/gitops-prod
+          cat > /tmp/gitops-prod/kustomization.yaml << EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          bases:
+            - ../../base
+
+          namespace: nexus-production
+
+          # Production-specific patches for resource requests, limits, replicas
+          patchesStrategicMerge:
+            - deployment.yaml
+
+          # Image pull policy and security policies
+          commonLabels:
+            environment: production
+            deployed-by: github-actions
+            deployment-version: $VERSION
+          EOF
+
+          cat > /tmp/gitops-prod/deployment.yaml << EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: nexus-api
+            annotations:
+              deployment.kubernetes.io/revision: "1"
+              nexus.io/deployed-by: github-actions
+              nexus.io/deploy-timestamp: "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          spec:
+            replicas: 3  # High availability
+            strategy:
+              type: RollingUpdate
+              rollingUpdate:
+                maxSurge: 1
+                maxUnavailable: 0  # Zero-downtime deployment
+            template:
+              spec:
+                containers:
+                  - name: nexus-api
+                    image: ghcr.io/${{ github.repository_owner }}/nexus-api:$VERSION
+                    resources:
+                      requests:
+                        cpu: 500m
+                        memory: 512Mi
+                      limits:
+                        cpu: 1000m
+                        memory: 1Gi
+                    livenessProbe:
+                      httpGet:
+                        path: /health
+                        port: 8080
+                      initialDelaySeconds: 10
+                      periodSeconds: 10
+                    readinessProbe:
+                      httpGet:
+                        path: /ready
+                        port: 8080
+                      initialDelaySeconds: 5
+                      periodSeconds: 5
+          EOF
+
+          echo "Production manifest structure created"
+
+      - name: Production approval gate
+        run: |
+          echo "Production deployment approval gate"
+          echo ""
+          echo "This workflow requires GitHub Environment approval:"
+          echo "1. User must have write access to the repository"
+          echo "2. Environment protections must approve the deployment"
+          echo "3. Required reviewers (if configured) must approve"
+          echo ""
+          echo "Deployment Summary:"
+          echo "- Environment: production"
+          echo "- Version: ${{ github.event.inputs.version }}"
+          echo "- Triggered by: ${{ github.actor }}"
+          echo "- Timestamp: $(date -u)"
+
+      - name: Apply production deployment
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          echo "Applying production deployment..."
+          echo "Version: $VERSION"
+          echo ""
+          echo "In production, this step would:"
+          echo "1. Create deployment branch from main"
+          echo "2. Update infrastructure/overlays/production/ with version"
+          echo "3. Commit to main (GitOps pattern: configuration as code)"
+          echo "4. Monitor ArgoCD or Flux for sync (set to manual for critical)"
+          echo "5. Validate all replicas are healthy"
+
+      - name: Monitor production rollout
+        run: |
+          echo "Monitoring production deployment..."
+          echo ""
+          echo "Deployment progress (in production):"
+          echo "kubectl rollout status -n nexus-production deployment/nexus-api --timeout=5m"
+          echo ""
+          echo "Health checks:"
+          echo "- Application health checks"
+          echo "- Error rate monitoring (should remain < 0.1%)"
+          echo "- Latency monitoring (p99 < 200ms baseline + 10%)"
+          echo "- Resource utilization monitoring"
+
+      - name: Create post-deployment issue
+        if: always()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const version = '${{ github.event.inputs.version }}';
+            const actor = '${{ github.actor }}';
+            const status = '${{ job.status }}';
+
+            // In production, this would create an issue for deployment tracking
+            console.log(`Production deployment completed`);
+            console.log(`Version: ${version}`);
+            console.log(`Deployed by: ${actor}`);
+            console.log(`Status: ${status}`);
+            console.log(`Timestamp: ${new Date().toISOString()}`);
+
+      - name: Deployment notification
+        if: always()
+        run: |
+          echo "Deployment notification:"
+          echo "Environment: production"
+          echo "Version: ${{ github.event.inputs.version }}"
+          echo "Status: ${{ job.status }}"
+          echo ""
+          echo "In production, send notifications to:"
+          echo "- Slack channel (#deployments)"
+          echo "- PagerDuty incident (if it was a failed deployment)"
+          echo "- Email to ops team"

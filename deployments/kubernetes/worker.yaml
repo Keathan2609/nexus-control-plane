@@ -1,0 +1,184 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-worker
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  # No explicit strategy block here on purpose. Workers pull jobs from a queue rather than
+  # receiving pushed traffic, so the default RollingUpdate (25%/25%) is fine: briefly
+  # running fewer workers only slows the queue, it does not fail requests. Contrast the API,
+  # where the strategy is pinned because unavailability is user-visible.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nexus
+      app.kubernetes.io/instance: nexus
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nexus
+        app.kubernetes.io/instance: nexus
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/part-of: nexus
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: kustomize
+        nexus.dev/database-client: "true"
+        nexus.dev/nats-client: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: nexus-worker
+      automountServiceAccountToken: false
+      # 900s (15 min). This is the one grace period worth arguing about.
+      #
+      # On SIGTERM the worker stops claiming new jobs and finishes what it already holds.
+      # A pipeline job is somebody's build or deploy: killing it mid-flight burns CI minutes,
+      # can leave a half-pushed image or a partially applied environment, and the lease then
+      # has to expire (NEXUS_WORKER_LEASE_SECONDS, 60s) before a peer can retry it.
+      #
+      # 15 minutes covers the long tail of normal jobs without letting a genuinely stuck
+      # worker block a node drain indefinitely. Anything still running at 15 minutes is
+      # assumed hung; SIGKILL lands, the lease lapses, and a peer reclaims the job.
+      #
+      # If your pipelines routinely run longer than this, raise it here AND check that your
+      # node drain timeout and cluster autoscaler drain grace exceed it - otherwise the
+      # platform kills the pod before Kubernetes ever gets to.
+      terminationGracePeriodSeconds: 900
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: nexus
+              app.kubernetes.io/component: worker
+      containers:
+        - name: worker
+          image: ghcr.io/keathan2609/nexus-worker:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Metrics only. The worker takes no inbound service traffic - it claims work
+            # from NATS JetStream and writes results to Postgres.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: nexus-config
+            - secretRef:
+                name: nexus-secrets
+          env:
+            - name: NEXUS_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 15
+            timeoutSeconds: 3
+            # Deliberately slack (15s x 5 = 75s to restart). A worker mid-job may be busy
+            # enough to be slow answering; restarting it costs an in-flight pipeline, so we
+            # want real confidence it is wedged before we kill it.
+            failureThreshold: 5
+          readinessProbe:
+            # The worker exposes only /healthz, so readiness reuses it. There is no Service
+            # in front of these pods, so readiness does not gate traffic - it gates the
+            # rollout, which is exactly what we want it for.
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            # Higher ceiling than the API: jobs shell out, clone repositories and build
+            # artefacts, and NEXUS_WORKER_CONCURRENCY of them run at once. The request is
+            # sized for steady state so the scheduler packs well; the limit is the blast
+            # radius cap for one bad job.
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        # Disk-backed, not memory-backed: job checkouts and build artefacts can be large and
+        # tmpfs pages count against the container memory limit, so a big clone would OOM the
+        # worker rather than just filling a directory. sizeLimit makes a runaway job evict
+        # its own pod instead of filling the node and taking neighbours down with it.
+        - name: workspace
+          emptyDir:
+            sizeLimit: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-worker-metrics
+  namespace: nexus
+  labels:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/part-of: nexus
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  # Headless. There is nothing to load balance - this Service exists purely so a
+  # ServiceMonitor/PodMonitor has a stable target to discover worker endpoints from.
+  clusterIP: None
+  # Scrape workers even while they are draining, otherwise we lose exactly the metrics we
+  # want when investigating a slow shutdown.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: nexus
+    app.kubernetes.io/instance: nexus
+    app.kubernetes.io/component: worker
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

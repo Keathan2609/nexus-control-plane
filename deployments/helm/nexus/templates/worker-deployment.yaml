@@ -1,0 +1,159 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nexus.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "worker") | nindent 4 }}
+  annotations:
+    # Wave 1, after the API. Not because the worker calls the API - it does not, it claims
+    # from JetStream - but because if a release is going to fail we would rather find out on
+    # the API, which has the fastest and clearest failure signal, before we roll the fleet
+    # of workers that each take 15 minutes to drain.
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  {{- if not .Values.worker.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  # No explicit strategy: workers pull from a queue rather than receiving pushed traffic, so
+  # the default 25%/25% RollingUpdate is fine. Briefly running fewer workers slows the queue;
+  # it does not fail requests. The API pins its strategy because there unavailability is
+  # user-visible - here it is not.
+  selector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nexus.componentLabels" (dict "root" $ "component" "worker") | nindent 8 }}
+        nexus.dev/database-client: "true"
+        nexus.dev/nats-client: "true"
+        {{- with .Values.worker.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "nexus.metricsAnnotations" . | nindent 8 }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nexus.serviceAccountName" (dict "root" $ "component" "worker") }}
+      automountServiceAccountToken: false
+      {{- include "nexus.imagePullSecrets" . | nindent 6 }}
+      # The grace period that matters most in this chart. On SIGTERM the worker stops
+      # claiming new jobs and finishes what it already holds; a pipeline job is somebody's
+      # build or deploy, and killing it mid-flight burns CI minutes, can leave a half-pushed
+      # image, and forces the lease (NEXUS_WORKER_LEASE_SECONDS) to expire before a peer
+      # retries. See the extended note on worker.terminationGracePeriodSeconds in values.yaml
+      # - in particular, this value is only real if your node drain timeout also exceeds it.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- if lt (int .Values.worker.terminationGracePeriodSeconds) (int .Values.worker.leaseSeconds) }}
+      {{- fail (printf "worker.terminationGracePeriodSeconds (%v) is below worker.leaseSeconds (%v): a draining worker would be killed before it could even finish one lease period" .Values.worker.terminationGracePeriodSeconds .Values.worker.leaseSeconds) }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
+      {{- with .Values.worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- include "nexus.topologySpreadConstraints" (dict "root" $ "component" "worker" "constraints" .) | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "nexus.image" (dict "root" $ "image" .Values.worker.image) }}
+          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          ports:
+            # Metrics only - the worker takes no inbound service traffic.
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            {{- include "nexus.envFrom" . | nindent 12 }}
+          env:
+            - name: NEXUS_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 15
+            timeoutSeconds: 3
+            # Deliberately slack: 15s x 5 = 75s before a restart. A worker mid-job can be
+            # busy enough to answer slowly, and restarting it costs an in-flight pipeline,
+            # so we want real confidence it is wedged before killing it.
+            failureThreshold: 5
+          readinessProbe:
+            # The worker exposes only /healthz, so readiness reuses it. There is no Service
+            # routing traffic to these pods, so readiness gates the rollout rather than
+            # traffic - which is exactly what we want it for.
+            httpGet:
+              path: /healthz
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.worker.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        # Disk-backed, not tmpfs. tmpfs pages count against the container memory limit, so a
+        # large checkout would OOM the worker rather than just filling a directory.
+        # sizeLimit makes a runaway job evict its own pod instead of filling the node and
+        # taking its neighbours down with it.
+        - name: workspace
+          emptyDir:
+            sizeLimit: {{ .Values.worker.workspace.sizeLimit }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nexus.fullname" . }}-worker-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "worker") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  # Headless: nothing to load balance. This exists so a ServiceMonitor has a stable object
+  # to discover worker endpoints from.
+  clusterIP: None
+  # Keep scraping workers while they drain - a slow shutdown is exactly when those metrics
+  # are worth having.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "worker") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

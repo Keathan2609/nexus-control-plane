@@ -1,0 +1,145 @@
+{{/*
+Horizontal Pod Autoscalers for the three components that can legitimately scale
+horizontally. The reconciler is absent on purpose - it is a singleton, see the note in
+reconciler-deployment.yaml.
+
+autoscaling/v2 throughout: v2beta2 is long gone and v1 cannot express memory targets or
+scaling behaviour, and the behaviour block is the part that makes an HPA usable on bursty
+IDP traffic rather than a source of replica flapping.
+*/}}
+{{- if .Values.api.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "nexus.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "nexus.fullname" . }}-api
+  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
+  metrics:
+    {{- with .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with .Values.api.autoscaling.targetMemoryUtilizationPercentage }}
+    # Memory as a secondary signal. Note it is a poor scale-DOWN signal for a Go service -
+    # the runtime does not return heap to the OS eagerly, so memory utilisation stays high
+    # after load drops. The long scaleDown stabilisation window below is what keeps that
+    # from pinning replicas at the ceiling.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+  {{- with .Values.api.autoscaling.behavior }}
+  # Scale up fast, scale down slowly. An IDP sees bursty load whenever CI fires; shedding
+  # replicas eagerly right after a burst just means scaling back up a minute later, and each
+  # cycle costs a cold start.
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+{{- if .Values.worker.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "nexus.fullname" . }}-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "worker") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "nexus.fullname" . }}-worker
+  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  metrics:
+    {{- with .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+    # CPU is an honestly mediocre signal here: pipeline jobs are IO-bound, so a worker can
+    # be fully saturated with queued work while sitting at 30% CPU. Treat this as a
+    # backstop. The right signal is JetStream pending-message depth via KEDA or the
+    # Prometheus adapter - wire it through worker.autoscaling.extraMetrics.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with .Values.worker.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with .Values.worker.autoscaling.extraMetrics }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.worker.autoscaling.behavior }}
+  # Much longer scaleDown window than the API. Scaling in a worker can interrupt a running
+  # pipeline, and with a 15-minute grace period a scale-down decision commits the cluster
+  # for a long time. Be conservative.
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+{{- if .Values.web.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "nexus.fullname" . }}-web
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "web") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "nexus.fullname" . }}-web
+  minReplicas: {{ .Values.web.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.web.autoscaling.maxReplicas }}
+  metrics:
+    {{- with .Values.web.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+    {{- with .Values.web.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ . }}
+    {{- end }}
+  {{- with .Values.web.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

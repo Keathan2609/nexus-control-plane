@@ -1,0 +1,51 @@
+# Base kustomization for NEXUS.
+#
+#   kubectl apply -k deployments/kubernetes --dry-run=client   # validate
+#   kubectl apply -k deployments/kubernetes                    # ship
+#
+# This base is deliberately environment-agnostic: it encodes the shape of the system, not
+# the shape of any one cluster. Per-environment differences (replica counts, image tags,
+# ingress hostnames, real secrets) belong in overlays that patch this, so that "what is
+# different about staging" is a small readable diff rather than a forked copy of everything.
+#
+# Note there is no Ingress here. Ingress is where clusters differ most - controller,
+# annotations, TLS issuer, hostname - so it lives in the overlay, or you use the Helm chart
+# in ../helm/nexus which has ingress.enabled as a value.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: nexus
+
+namespace: nexus
+
+resources:
+  - namespace.yaml
+  - serviceaccounts.yaml
+  - configmap.yaml
+  # Placeholder credentials only - see the header in secret.yaml. Remove this entry once an
+  # ExternalSecret or SealedSecret provides `nexus-secrets`, otherwise a later `apply -k`
+  # will happily overwrite real credentials with REPLACE_ME strings.
+  - secret.yaml
+  - api.yaml
+  - worker.yaml
+  - reconciler.yaml
+  - web.yaml
+  - networkpolicy.yaml
+
+commonAnnotations:
+  app.kubernetes.io/part-of: nexus
+
+# Single place to bump the release. Overlays override these rather than patching four
+# separate Deployment files, and pinning the tag here is what keeps `latest` out of the
+# cluster - a mutable tag means two pods of the same "version" can be running different
+# code, which is impossible to debug and impossible to roll back.
+images:
+  - name: ghcr.io/keathan2609/nexus-api
+    newTag: "0.1.0"
+  - name: ghcr.io/keathan2609/nexus-worker
+    newTag: "0.1.0"
+  - name: ghcr.io/keathan2609/nexus-reconciler
+    newTag: "0.1.0"
+  - name: ghcr.io/keathan2609/nexus-web
+    newTag: "0.1.0"

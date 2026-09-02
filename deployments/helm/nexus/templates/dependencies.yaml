@@ -1,0 +1,378 @@
+{{/*
+Optional in-cluster dependencies: PostgreSQL 16 and NATS 2.10 with JetStream.
+
+Read this before enabling either in an environment that matters.
+
+These are intentionally minimal single-purpose StatefulSets, not replacements for a managed
+service or a real operator. There is no automated backup, no point-in-time recovery, no
+failover, and no connection pooler. For PostgreSQL specifically - the NEXUS system of record
+- that means postgresql.enabled=true is an evaluation and local-development affordance, and
+the production answer is RDS/Cloud SQL/CloudNativePG/Crunchy. The default is false for
+exactly that reason.
+
+NATS is a softer case and defaults to enabled: JetStream is replayable transport rather than
+the system of record, so losing a node costs a reconnect and a catch-up rather than data.
+
+Both live at sync-wave -3: after config and identity (-5), before migrations (-1) and the
+API (0). That is what stops the API from starting against a database that has not been
+scheduled yet and burning its restart backoff while Argo reports Progressing.
+*/}}
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nexus.fullname" . }}-postgresql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "postgresql") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  clusterIP: None
+  selector:
+    {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "postgresql") | nindent 4 }}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nexus.fullname" . }}-postgresql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "postgresql") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  serviceName: {{ include "nexus.fullname" . }}-postgresql
+  # One. This StatefulSet has no replication and no failover; a second replica would be a
+  # second independent database, not a standby. If you need HA, you need an operator.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "postgresql") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nexus.componentLabels" (dict "root" $ "component" "postgresql") | nindent 8 }}
+    spec:
+      # 120s. Postgres needs to complete a shutdown checkpoint; SIGKILL mid-checkpoint means
+      # crash recovery on the next start, which on a large database is slow and alarming.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        # 70 is the postgres uid in the official Alpine images.
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgresql
+          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            # From a Secret you create out of band - same discipline as the app credentials.
+            # There is no default password value anywhere in this chart.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "postgresql.auth.existingSecret is required when postgresql.enabled=true" .Values.postgresql.auth.existingSecret }}
+                  key: {{ .Values.postgresql.auth.secretKey }}
+            # The image initdb's into $PGDATA. Pointing it at a subdirectory of the mount
+            # rather than the mount root avoids the lost+found problem on ext4 volumes,
+            # where initdb refuses to run because the directory is not empty.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.auth.username | quote }}, "-d", {{ .Values.postgresql.auth.database | quote }}]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.postgresql.auth.username | quote }}, "-d", {{ .Values.postgresql.auth.database | quote }}]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # Postgres writes its unix socket and lock file here, so readOnlyRootFilesystem
+            # needs these mounted or the server will not start.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        {{- if not .Values.postgresql.persistence.enabled }}
+        # No persistence: the database is gone when the pod is. Fine for CI, catastrophic
+        # anywhere else - which is why persistence defaults to enabled.
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.postgresql.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "nexus.componentLabels" (dict "root" $ "component" "postgresql") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.postgresql.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.persistence.size }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nexus.fullname" . }}-nats-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "nats") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+data:
+  nats.conf: |
+    port: 4222
+    http: 8222
+    server_name: $SERVER_NAME
+    {{- if .Values.nats.jetstream.enabled }}
+    jetstream {
+      store_dir: "/data/jetstream"
+      max_memory_store: {{ .Values.nats.jetstream.memStorageSize }}
+      max_file_store: {{ .Values.nats.jetstream.fileStorageSize }}
+    }
+    {{- end }}
+    {{- if gt (int .Values.nats.replicaCount) 1 }}
+    cluster {
+      name: nexus
+      port: 6222
+      routes: [
+        {{- $fullname := include "nexus.fullname" . }}
+        {{- $ns := .Release.Namespace }}
+        {{- range $i := until (int .Values.nats.replicaCount) }}
+        "nats://{{ $fullname }}-nats-{{ $i }}.{{ $fullname }}-nats.{{ $ns }}.svc.cluster.local:6222",
+        {{- end }}
+      ]
+    }
+    {{- end }}
+    lame_duck_grace_period: 10s
+    lame_duck_duration: 30s
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nexus.fullname" . }}-nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "nats") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  # Headless: NATS clients discover the full server list and manage their own connection
+  # and failover, so putting a load balancer VIP in front would only get in the way.
+  clusterIP: None
+  # Peers must resolve each other by DNS before any of them is ready, otherwise the cluster
+  # can never form - a chicken-and-egg deadlock at first boot.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "nats") | nindent 4 }}
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client
+      protocol: TCP
+    - name: cluster
+      port: 6222
+      targetPort: cluster
+      protocol: TCP
+    - name: monitor
+      port: 8222
+      targetPort: monitor
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nexus.fullname" . }}-nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "nats") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  serviceName: {{ include "nexus.fullname" . }}-nats
+  # 3 by default. JetStream replication needs an odd number for quorum; 3 tolerates one
+  # node loss. Running 2 is strictly worse than running 1 - it cannot form a majority.
+  replicas: {{ .Values.nats.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "nats") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nexus.componentLabels" (dict "root" $ "component" "nats") | nindent 8 }}
+      annotations:
+        # Checksummed from the nats values rather than from the rendered ConfigMap: the
+        # ConfigMap lives in this same file, so including it here would recurse forever.
+        # The values are what actually drive nats.conf, so this rolls the pods on exactly
+        # the changes that matter.
+        checksum/config: {{ toYaml .Values.nats | sha256sum }}
+    spec:
+      # Long enough for lame-duck mode to finish: NATS stops accepting new connections,
+      # gradually evicts existing ones so clients reconnect elsewhere, and only then exits.
+      # Cutting that short means every client reconnects at once instead of gradually.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nats
+          image: "{{ .Values.nats.image.repository }}:{{ .Values.nats.image.tag }}"
+          imagePullPolicy: {{ .Values.nats.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/nats/nats.conf"
+            # The pidfile is not optional here - the preStop hook signals lame-duck mode by
+            # pid, and without -P there is no pidfile for it to signal, so the hook fails
+            # silently and every client gets dropped on shutdown instead of migrating.
+            - "-P"
+            - "/var/run/nats/nats.pid"
+          env:
+            # Stable per-pod identity for the JetStream metadata layer. Without a stable
+            # server_name a restarted pod looks like a brand new server and the raft group
+            # has to re-elect rather than just re-syncing.
+            - name: SERVER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: client
+              containerPort: 4222
+              protocol: TCP
+            - name: cluster
+              containerPort: 6222
+              protocol: TCP
+            - name: monitor
+              containerPort: 8222
+              protocol: TCP
+          # /healthz on the monitoring port, with NATS's own semantics: js-enabled-only for
+          # liveness (is the server up) versus the full readiness check that also waits for
+          # streams to be current. Using the strict check for liveness would restart a
+          # server that is merely catching up, which is the opposite of helpful.
+          livenessProbe:
+            httpGet:
+              path: /healthz?js-enabled-only=true
+              port: monitor
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz?js-server-only=true
+              port: monitor
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Signal lame-duck mode explicitly so the server sheds clients gracefully
+              # rather than dropping every connection when the process exits.
+              exec:
+                command: ["nats-server", "--signal", "ldm=/var/run/nats/nats.pid"]
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: pid
+              mountPath: /var/run/nats
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "nexus.fullname" . }}-nats-config
+        - name: pid
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+        {{- if not .Values.nats.jetstream.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.nats.jetstream.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "nexus.componentLabels" (dict "root" $ "component" "nats") | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- with .Values.nats.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.nats.jetstream.fileStorageSize }}
+  {{- end }}
+{{- end }}

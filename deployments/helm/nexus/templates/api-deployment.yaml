@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nexus.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  annotations:
+    # Wave 0. Everything the API needs is already in place by the time this syncs:
+    # config and identity at -5, PostgreSQL and NATS at -3, schema migrations at -1.
+    # Without the ordering, the API would start, fail to reach a database that has not been
+    # scheduled yet, and burn through its restart backoff while Argo reports Progressing.
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  # Omitted entirely when autoscaling is on, so the HPA owns the field. Setting both means
+  # Helm and the HPA fight over replicas on every sync - the classic "why did my cluster
+  # scale back to 3 every ten minutes" bug.
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    {{- toYaml .Values.api.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 8 }}
+        # Read by the NetworkPolicy that fronts PostgreSQL. This label, not namespace
+        # membership, is what authorises a pod to reach the system of record.
+        nexus.dev/database-client: "true"
+        nexus.dev/nats-client: "true"
+        {{- with .Values.api.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pods when configuration changes. Without this a `helm upgrade` that only
+        # touches the ConfigMap leaves every pod running the old values, and the drift is
+        # invisible until something restarts hours later for an unrelated reason.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "nexus.metricsAnnotations" . | nindent 8 }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nexus.serviceAccountName" (dict "root" $ "component" "api") }}
+      automountServiceAccountToken: false
+      {{- include "nexus.imagePullSecrets" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.api.podSecurityContext | nindent 8 }}
+      {{- with .Values.api.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- include "nexus.topologySpreadConstraints" (dict "root" $ "component" "api" "constraints" .) | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "nexus.image" (dict "root" $ "image" .Values.api.image) }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            {{- include "nexus.envFrom" . | nindent 12 }}
+          env:
+            - name: NEXUS_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # startup absorbs slow first boot so liveness can stay tight afterwards.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          # liveness asks only "is this process wedged". It deliberately does NOT check the
+          # database: if it did, a Postgres blip would restart every API pod at once and
+          # turn a recoverable dependency failure into a self-inflicted outage.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # readiness gates traffic and IS allowed to fail on dependency loss - a pod that
+          # cannot reach Postgres should stop receiving requests without being killed.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          {{- if .Values.api.preStopSleepSeconds }}
+          lifecycle:
+            preStop:
+              # Endpoint removal across kube-proxy and the ingress controller is eventually
+              # consistent. Without this pause the container stops accepting connections
+              # while data planes are still sending them - sporadic 502s on every deploy.
+              sleep:
+                seconds: {{ .Values.api.preStopSleepSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.api.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # readOnlyRootFilesystem leaves the process nowhere to write. Temp files, upload
+        # buffering and telemetry spooling all want /tmp, so give them a bounded emptyDir
+        # rather than unlocking the whole root filesystem.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi

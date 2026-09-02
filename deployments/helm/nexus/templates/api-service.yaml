@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nexus.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    {{- with .Values.api.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ .Values.api.service.type }}
+  # None deliberately: the API is stateless and even load beats sticky SSE reconnects.
+  # This is the knob if stream churn ever shows up in the SLO.
+  sessionAffinity: None
+  selector:
+    {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.api.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+---
+{{- if and .Values.api.podDisruptionBudget.enabled (not .Values.api.autoscaling.enabled) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "nexus.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  # A count, not a percentage: with a small replica count a percentage rounds in ways that
+  # surprise people during scale-down. 2-of-3 keeps a quorum of serving capacity through a
+  # node drain or cluster upgrade while still letting the drain make progress.
+  #
+  # Guard rail worth knowing about: if minAvailable ever equals or exceeds replicaCount, no
+  # voluntary eviction can ever succeed and node drains hang forever. The template refuses
+  # to render that rather than letting you discover it during a cluster upgrade at 2am.
+  {{- if ge (int .Values.api.podDisruptionBudget.minAvailable) (int .Values.api.replicaCount) }}
+  {{- fail (printf "api.podDisruptionBudget.minAvailable (%v) must be less than api.replicaCount (%v), otherwise node drains will block indefinitely" .Values.api.podDisruptionBudget.minAvailable .Values.api.replicaCount) }}
+  {{- end }}
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+{{- else if .Values.api.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "nexus.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  # Autoscaling is on, so replicaCount is not the live replica count and the fixed-count
+  # check above cannot be applied. maxUnavailable is the safe formulation under an HPA: it
+  # stays correct whether the HPA has scaled to minReplicas or maxReplicas, whereas a
+  # minAvailable tuned for maxReplicas would block all drains at the bottom of the range.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+{{- end }}

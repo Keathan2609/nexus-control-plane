@@ -1,0 +1,66 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored; this
+# file is not, so nothing secret belongs in it.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+# ---------------------------------------------------------------------------
+# Required
+# ---------------------------------------------------------------------------
+
+# The kubeconfig context to deploy into. Find yours with:
+#   kubectl config get-contexts
+#
+# kind names its contexts "kind-<cluster name>", so a cluster created with
+# `kind create cluster --name nexus` gives you "kind-nexus".
+kube_context = "kind-nexus"
+
+# ---------------------------------------------------------------------------
+# Commonly changed
+# ---------------------------------------------------------------------------
+
+# Set false when you want the database and NATS running in the cluster while
+# you run the Go services on the host. The namespace, datastores and the NEXUS
+# Secret are still created; only the chart is skipped.
+# deploy_workloads = true
+
+# Images are expected to already be inside the cluster. Build and side-load:
+#   docker build -t nexus/nexus-api:dev -f cmd/nexus-api/Dockerfile .
+#   kind load docker-image nexus/nexus-api:dev --name nexus
+# image_registry = "nexus"
+# image_tag      = "dev"
+
+# Prometheus and Grafana. Roughly doubles the memory the stack needs, so it is
+# off unless you ask for it.
+# enable_observability = false
+
+# ---------------------------------------------------------------------------
+# Occasionally changed
+# ---------------------------------------------------------------------------
+
+# namespace  = "nexus"
+# log_level  = "debug"
+
+# Both default to 1. Two API replicas is a cheap way to watch a rolling update
+# actually roll.
+# api_replicas    = 1
+# worker_replicas = 1
+# web_replicas    = 1
+
+# nexus-reconciler is fixed at 1 and is not configurable here: it is a single
+# control loop with no leader election.
+
+# In-flight jobs per worker.
+# worker_concurrency = 4
+
+# Volume sizes. The local-path provisioner in kind ignores these and uses the
+# host disk, but Docker Desktop and minikube honour them.
+# postgres_storage_size = "4Gi"
+# nats_storage_size     = "2Gi"
+
+# Leave unset to use the cluster's default StorageClass. Set it only if
+# `kubectl get storageclass` shows no default.
+# storage_class_name = null
+
+# Path to the Helm chart. Leave unset to use deployments/helm/nexus in this
+# repository; set it only when testing a packaged chart from elsewhere.
+# chart_path = null

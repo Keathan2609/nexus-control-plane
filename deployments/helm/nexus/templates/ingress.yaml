@@ -1,0 +1,56 @@
+{{- if .Values.ingress.enabled }}
+{{/*
+One Ingress fronting both the console and the API on a single hostname.
+
+Path-prefix routing rather than two hostnames (console.example.com + api.example.com) is a
+deliberate choice: same-origin means no CORS preflight on every API call, and it means SSE
+works without withCredentials gymnastics and third-party-cookie problems in browsers that
+are steadily tightening cross-site behaviour.
+
+Ordering matters. The API prefix is listed first because ingress-nginx evaluates paths by
+specificity and then order; putting the "/" catch-all first is the classic way to end up
+serving the console HTML at /api/pipelines and wondering why the client gets a parse error.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "nexus.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.labels" . | nindent 4 }}
+  annotations:
+    # Wave 2, with the console: no point publishing a public route to backends that are
+    # still rolling.
+    argocd.argoproj.io/sync-wave: "2"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.apiPathPrefix }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nexus.fullname" . }}-api
+                port:
+                  number: {{ .Values.api.service.port }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "nexus.fullname" . }}-web
+                port:
+                  number: {{ .Values.web.service.port }}
+{{- end }}

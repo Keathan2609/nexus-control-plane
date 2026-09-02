@@ -1,0 +1,303 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+Deny inbound at the namespace edge, then open only the paths the system actually uses.
+
+The rule that carries the most weight is postgres-allow-control-plane: reaching the system
+of record is gated on a pod label, not on namespace membership, so an ad-hoc `kubectl run`
+debug pod in this namespace cannot open a psql session even though the DSN is sitting in a
+Secret it could read.
+
+Enforcement depends entirely on your CNI implementing NetworkPolicy. On a CNI that ignores
+it, all of this applies cleanly and protects nothing - which is why the values default is
+`enabled: false`. Turn it on once you have confirmed enforcement, and verify with a
+deliberate connectivity test rather than assuming.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-default-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.labels" . | nindent 4 }}
+  annotations:
+    # Wave -5: policy is in place before any pod it governs exists, so there is never a
+    # window where workloads are running unprotected.
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  # Empty podSelector = every pod in the namespace. Ingress only. Egress is restricted
+  # per-component below instead, so that adding a policy to one workload cannot accidentally
+  # black-hole another.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-api-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # The console, server-side rendering against the API.
+        - podSelector:
+            matchLabels:
+              {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "web") | nindent 14 }}
+        # The ingress controller: browser traffic and inbound SCM webhooks.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-web-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "web") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "web") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - protocol: TCP
+          port: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-metrics-scrape
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  # Every NEXUS pod serves /metrics on 9090. Scoping this to the monitoring namespace rather
+  # than opening it namespace-wide keeps the metrics port from doubling as an unpoliced side
+  # channel between workloads that are otherwise not allowed to talk to each other.
+  podSelector:
+    matchLabels:
+      {{- include "nexus.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+      ports:
+        - protocol: TCP
+          port: 9090
+---
+{{- if .Values.postgresql.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-postgres-allow-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "database") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  # The important one.
+  #
+  # Only pods labelled nexus.dev/database-client=true may open a connection to PostgreSQL.
+  # Today that is exactly three workloads: api, worker, reconciler. The web console is not
+  # one of them and must go through the API. Neither is any debug pod someone kubectl-runs,
+  # which is the realistic threat this closes - a namespace holding a DB password in a
+  # Secret is otherwise one shell away from full table access.
+  #
+  # Rendered only when the bundled PostgreSQL is enabled. With a managed database the
+  # equivalent control is the egress rule below plus your cloud firewall or security group;
+  # do not leave both unconfigured and assume the label is protecting you.
+  podSelector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "postgresql") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              nexus.dev/database-client: "true"
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+{{- end }}
+{{- if .Values.nats.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-nats-allow-control-plane
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "nats") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "nats") | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              nexus.dev/nats-client: "true"
+      ports:
+        - protocol: TCP
+          port: 4222
+    # Peer-to-peer route port, so the JetStream cluster can actually form a mesh. Forgetting
+    # this is a popular way to end up with three NATS pods that each think they are alone.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "nats") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 6222
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-control-plane-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  # Attaching any egress rule makes egress default-deny for the selected pods, so this list
+  # has to be complete. An incomplete one does not fail loudly - it shows up as intermittent
+  # "DNS is flaky" reports, which is a miserable thing to debug.
+  podSelector:
+    matchLabels:
+      nexus.dev/database-client: "true"
+  policyTypes:
+    - Egress
+  egress:
+    # DNS first, for a reason: without it every name-based rule below is unreachable.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "postgresql") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- end }}
+    {{- if .Values.nats.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "nats") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 4222
+    {{- end }}
+    {{- with .Values.config.otelEndpoint }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Values.networkPolicy.observabilityNamespace }}
+      ports:
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
+    {{- end }}
+    {{- if .Values.networkPolicy.allowExternalEgress }}
+    # The internet, TLS only. Workers clone from SCM and push to registries and the API
+    # calls SCM APIs, so a blanket internal-only policy would break the product.
+    #
+    # The `except` blocks are the entire point of this rule: RFC1918 space and link-local
+    # are carved out so that "reach the internet" cannot be quietly turned into "reach the
+    # node metadata endpoint at 169.254.169.254" or "port-scan the VPC" by a hostile
+    # pipeline definition. Anything in-cluster has to match one of the explicit rules above.
+    #
+    # If you use a managed database or managed NATS reachable over a private endpoint, note
+    # that it falls inside these excepted ranges and needs its own explicit egress rule.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "nexus.fullname" . }}-web-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexus.componentLabels" (dict "root" $ "component" "web") | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+spec:
+  # The console gets DNS and the API. That is the whole list, and it is the other half of
+  # keeping the database restricted to the control plane: even if the console container were
+  # compromised and handed a valid DSN, it has no route to port 5432.
+  podSelector:
+    matchLabels:
+      {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "web") | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "nexus.componentSelectorLabels" (dict "root" $ "component" "api") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
