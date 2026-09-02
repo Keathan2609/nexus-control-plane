@@ -21,7 +21,11 @@ func dsn(t *testing.T) string {
 	t.Helper()
 	url := os.Getenv("NEXUS_TEST_DATABASE_URL")
 	if url == "" {
-		url = "postgres://nexus:nexus@localhost:5436/nexus?sslmode=disable"
+		// A separate database from the development one, deliberately. Integration tests
+		// leave rows behind by design - that is what makes them exercise the same
+		// indexes a populated system uses - and mixing that residue into the database
+		// the console reads would make the demo estate quietly wrong.
+		url = "postgres://nexus:nexus@localhost:5436/nexus_test?sslmode=disable"
 	}
 	return url
 }

@@ -39,11 +39,11 @@ type Metrics struct {
 	LeasesReaped     prometheus.Counter
 
 	// Delivery
-	Deployments       *prometheus.CounterVec
+	Deployments        *prometheus.CounterVec
 	DeploymentDuration *prometheus.HistogramVec
-	HealthChecks      *prometheus.CounterVec
-	Rollbacks         *prometheus.CounterVec
-	DriftDetected     prometheus.Counter
+	HealthChecks       *prometheus.CounterVec
+	Rollbacks          *prometheus.CounterVec
+	DriftDetected      prometheus.Counter
 
 	// Eventing
 	EventsPublished *prometheus.CounterVec
