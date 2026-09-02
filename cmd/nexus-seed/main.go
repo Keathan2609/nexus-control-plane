@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -107,6 +108,18 @@ type seeder struct {
 	devID   domain.ID
 }
 
+// projectPlan is everything decided about a project before any run is written.
+type projectPlan struct {
+	projectID   domain.ID
+	defID       domain.ID
+	envs        []seededEnv
+	index       int
+	runCount    int
+	outcomes    []string
+	lastSuccess int
+	lastPromote int
+}
+
 func (s *seeder) seed() error {
 	if err := s.organisation(); err != nil {
 		return err
@@ -121,6 +134,7 @@ func (s *seeder) seed() error {
 		{"Storefront Web", "storefront-web", "Customer-facing storefront.", "NODE", "acme/storefront-web", 3000},
 	}
 
+	var plans []*projectPlan
 	for i, p := range projects {
 		projectID, defID, err := s.project(p.name, p.slug, p.desc, p.runtime, p.repo, p.port)
 		if err != nil {
@@ -130,7 +144,56 @@ func (s *seeder) seed() error {
 		if err != nil {
 			return err
 		}
-		if err := s.history(projectID, defID, envs, i); err != nil {
+		plans = append(plans, buildPlan(projectID, defID, envs, i))
+	}
+
+	// Runs are written oldest-first across every project rather than project by
+	// project. Identifiers are ULIDs minted at insert time, so insertion order is
+	// identifier order — and every list in the console is sorted by identifier, which
+	// is what makes "ORDER BY id DESC" mean "most recent first" without a second index.
+	// Seeding one project at a time would satisfy the schema but make the dashboard
+	// show three projects in three blocks instead of interleaved by time.
+	type item struct {
+		plan *projectPlan
+		i    int
+		age  time.Duration
+	}
+	var items []item
+	for _, pl := range plans {
+		for i := 0; i < pl.runCount; i++ {
+			// The newest run of each project is minutes old, not hours. A run still
+			// RUNNING that started seven hours ago would be reported as an elapsed
+			// duration of seven hours, which reads as a stuck pipeline rather than a
+			// live one.
+			age := time.Duration(pl.runCount-1-i)*7*time.Hour + 4*time.Minute
+			items = append(items, item{plan: pl, i: i, age: age})
+		}
+	}
+	sort.Slice(items, func(a, b int) bool { return items[a].age > items[b].age })
+
+	for _, it := range items {
+		if err := s.writeRun(it.plan, it.i, it.age); err != nil {
+			return err
+		}
+	}
+
+	// The rolled-back production deployment, written last so it is the most recent
+	// entry in that environment's history.
+	for _, pl := range plans {
+		if pl.index != 1 {
+			continue
+		}
+		release, artifact, err := s.release(pl.projectID, "", 99, 30*time.Hour)
+		if err != nil {
+			return err
+		}
+		production := envByKind(pl.envs, "PRODUCTION")
+		if err := s.deployment(pl.projectID, production, release, artifact, "", "ROLLED_BACK", 30*time.Hour, true); err != nil {
+			return err
+		}
+		if err := s.audit(pl.projectID, "rollback.requested", "deployment", release.String(), s.devID,
+			map[string]any{"reason": "health verification failed after deploy", "environment": "production"},
+			30*time.Hour); err != nil {
 			return err
 		}
 	}
@@ -139,6 +202,80 @@ func (s *seeder) seed() error {
 		return err
 	}
 	fmt.Println("Seeded 3 projects with environments, run history, deployments and audit records.")
+	return nil
+}
+
+// buildPlan decides each run's outcome up front, because the deployment records depend
+// on knowing which run is the newest successful one: only that run's deployment may be
+// left live, since deployments_one_live_per_environment is a partial unique index.
+func buildPlan(projectID, defID domain.ID, envs []seededEnv, index int) *projectPlan {
+	runCount := 12 + index*3
+	pl := &projectPlan{
+		projectID: projectID, defID: defID, envs: envs, index: index,
+		runCount: runCount, outcomes: make([]string, runCount),
+		lastSuccess: -1, lastPromote: -1,
+	}
+	for i := 0; i < runCount; i++ {
+		switch {
+		case i == runCount-1 && index == 0:
+			pl.outcomes[i] = "RUNNING"
+		case i == runCount-3 && index == 0:
+			pl.outcomes[i] = "FAILED"
+		case i%9 == 4:
+			pl.outcomes[i] = "FAILED"
+		default:
+			pl.outcomes[i] = "SUCCEEDED"
+			pl.lastSuccess = i
+			if i%3 == 0 {
+				pl.lastPromote = i
+			}
+		}
+	}
+	return pl
+}
+
+// writeRun writes one run and, when it succeeded, the release and deployments it
+// produced.
+func (s *seeder) writeRun(pl *projectPlan, i int, age time.Duration) error {
+	def := demoPipeline("GO")
+	outcome := pl.outcomes[i]
+
+	runID, number, err := s.run(pl.projectID, pl.defID, def, outcome, age, i)
+	if err != nil {
+		return err
+	}
+	if outcome != "SUCCEEDED" {
+		return nil
+	}
+
+	release, artifact, err := s.release(pl.projectID, runID, i, age)
+	if err != nil {
+		return err
+	}
+
+	stagingState := "SUPERSEDED"
+	if i == pl.lastSuccess {
+		stagingState = "HEALTHY"
+	}
+	if err := s.deployment(pl.projectID, envByKind(pl.envs, "STAGING"), release, artifact, runID, stagingState, age, false); err != nil {
+		return err
+	}
+
+	// Only some staging deployments are promoted, which is what makes the production
+	// revision meaningfully lag staging.
+	if i%3 == 0 {
+		state := "SUPERSEDED"
+		if i == pl.lastPromote {
+			state = "HEALTHY"
+		}
+		if err := s.deployment(pl.projectID, envByKind(pl.envs, "PRODUCTION"), release, artifact, runID, state, age, false); err != nil {
+			return err
+		}
+		if err := s.audit(pl.projectID, "deployment.requested", "deployment", release.String(),
+			s.devID, map[string]any{"environment": "production", "run": number}, age); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -324,100 +461,6 @@ func (s *seeder) environments(projectID domain.ID, slug string, index int) ([]se
 		out = append(out, seededEnv{id: id, name: "pr-184", kind: "PREVIEW"})
 	}
 	return out, nil
-}
-
-// history writes the run and deployment record for one project.
-//
-// The shape is chosen so the console has something honest to show in every state it can
-// render: successes, one failure with a real error on a real step, a run still in
-// flight, and a production deployment that was rolled back.
-func (s *seeder) history(projectID, defID domain.ID, envs []seededEnv, index int) error {
-	def := demoPipeline("GO")
-	staging := envByKind(envs, "STAGING")
-	production := envByKind(envs, "PRODUCTION")
-
-	runCount := 12 + index*3
-
-	// Work out the outcome of every run up front, because the deployment records
-	// depend on knowing which run is the newest successful one. Only that run's
-	// deployment may be left live: deployments_one_live_per_environment is a partial
-	// unique index, so seeding two HEALTHY deployments into one environment is
-	// rejected by the database exactly as a double promotion would be in production.
-	outcomes := make([]string, runCount)
-	lastSuccess, lastPromoted := -1, -1
-	for i := 0; i < runCount; i++ {
-		switch {
-		case i == runCount-1 && index == 0:
-			outcomes[i] = "RUNNING"
-		case i == runCount-3 && index == 0:
-			outcomes[i] = "FAILED"
-		case i%9 == 4:
-			outcomes[i] = "FAILED"
-		default:
-			outcomes[i] = "SUCCEEDED"
-			lastSuccess = i
-			if i%3 == 0 {
-				lastPromoted = i
-			}
-		}
-	}
-
-	for i := 0; i < runCount; i++ {
-		age := time.Duration(runCount-i) * 7 * time.Hour
-		outcome := outcomes[i]
-
-		runID, number, err := s.run(projectID, defID, def, outcome, age, i)
-		if err != nil {
-			return err
-		}
-
-		if outcome == "SUCCEEDED" {
-			release, artifact, err := s.release(projectID, runID, i, age)
-			if err != nil {
-				return err
-			}
-			stagingState := "SUPERSEDED"
-			if i == lastSuccess {
-				stagingState = "HEALTHY"
-			}
-			if err := s.deployment(projectID, staging, release, artifact, runID, stagingState, age, false); err != nil {
-				return err
-			}
-			// Only some staging deployments are promoted to production, which is what
-			// makes the production revision meaningfully lag staging.
-			if i%3 == 0 {
-				state := "SUPERSEDED"
-				if i == lastPromoted {
-					state = "HEALTHY"
-				}
-				if err := s.deployment(projectID, production, release, artifact, runID, state, age, false); err != nil {
-					return err
-				}
-				if err := s.audit(projectID, "deployment.requested", "deployment", release.String(),
-					s.devID, map[string]any{"environment": "production", "run": number}, age); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// One rolled-back production deployment per project, with the audit record that
-	// goes with it.
-	if index == 1 {
-		release, artifact, err := s.release(projectID, "", 99, 30*time.Hour)
-		if err != nil {
-			return err
-		}
-		if err := s.deployment(projectID, production, release, artifact, "", "ROLLED_BACK", 30*time.Hour, true); err != nil {
-			return err
-		}
-		if err := s.audit(projectID, "rollback.requested", "deployment", release.String(), s.devID,
-			map[string]any{"reason": "health verification failed after deploy", "environment": "production"},
-			30*time.Hour); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *seeder) run(projectID, defID domain.ID, def pipelines.Definition, outcome string, age time.Duration, index int) (domain.ID, int64, error) {

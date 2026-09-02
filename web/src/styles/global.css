@@ -1,0 +1,123 @@
+@import './tokens.css';
+
+/* Reset — only what genuinely needs resetting. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Tabular figures everywhere. Durations, queue depths and job counts update in
+   * place, and proportional digits make them jitter as they change. */
+  font-variant-numeric: tabular-nums;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-title);
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.94em;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* A single visible focus treatment, applied only for keyboard navigation. Square and
+ * achromatic, like every other emphasis in the console. */
+:focus-visible {
+  outline: 1px solid var(--interactive);
+  outline-offset: 2px;
+  border-radius: 0;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* Scrollbars recede rather than announce themselves. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: 0;
+  border: 2px solid var(--bg-base);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-bright);
+}
+
+::selection {
+  background: var(--interactive);
+  color: var(--text-inverted);
+}

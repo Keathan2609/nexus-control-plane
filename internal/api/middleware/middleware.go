@@ -226,17 +226,26 @@ func CORS(allowed []string) func(http.Handler) http.Handler {
 func Authenticate(svc *auth.Service) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			header := r.Header.Get("Authorization")
-			if header == "" {
+			var token string
+			if header := r.Header.Get("Authorization"); header != "" {
+				bearer, ok := strings.CutPrefix(header, "Bearer ")
+				if !ok {
+					httpx.Error(w, RequestIDOf(r), httpx.Unauthorised("expected a Bearer token"))
+					return
+				}
+				token = strings.TrimSpace(bearer)
+			} else if q := r.URL.Query().Get("token"); q != "" && isStreamRequest(r) {
+				// EventSource cannot set request headers, so the event stream — and only
+				// the event stream — accepts its credential as a query parameter. The
+				// request logger records URL.Path and never RawQuery, so this does not
+				// put a token into the logs.
+				token = strings.TrimSpace(q)
+			}
+
+			if token == "" {
 				httpx.Error(w, RequestIDOf(r), httpx.Unauthorised("authentication is required"))
 				return
 			}
-			token, ok := strings.CutPrefix(header, "Bearer ")
-			if !ok {
-				httpx.Error(w, RequestIDOf(r), httpx.Unauthorised("expected a Bearer token"))
-				return
-			}
-			token = strings.TrimSpace(token)
 
 			var (
 				principal *auth.Principal
@@ -380,4 +389,10 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// isStreamRequest reports whether this is the Server-Sent Events endpoint, which is the
+// only route permitted to authenticate by query parameter.
+func isStreamRequest(r *http.Request) bool {
+	return strings.HasSuffix(r.URL.Path, "/api/v1/stream")
 }

@@ -1,0 +1,427 @@
+/*
+ * The console shell: identity, navigation column, status rail, content.
+ *
+ * The shell is the quietest part of the interface. It is present on every screen, so
+ * anything decorative here is decoration you cannot escape. It is built almost entirely
+ * from hairlines and tracked uppercase type, and the only colour it ever carries is in
+ * the status rail — the one part of the chrome that is genuinely reporting a condition.
+ *
+ * NEXUS puts a full-width status rail beneath the header rather than a cluster of
+ * readings inside it. The rail is the thing an operator glances at without reading:
+ * queue depth, live workers, drift, failing deployments. Giving it its own band means it
+ * has room to stay legible while a breadcrumb grows.
+ */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-rows: var(--header-height) var(--rail-height) 1fr;
+  grid-template-areas:
+    'brand  header'
+    'rail   rail'
+    'nav    content';
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* --- identity -------------------------------------------------------------
+ * Wordmark and build stacked rather than side by side, so the column opens with
+ * a block of type instead of a logo lockup.
+ */
+.brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg-base);
+}
+
+/* The mark: a 2x3 node grid, drawn in CSS rather than shipped as an asset. It reads as
+ * a set of connected nodes, which is what a control plane manages. */
+.mark {
+  display: grid;
+  grid-template-columns: repeat(2, 3px);
+  grid-template-rows: repeat(3, 3px);
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.markDot {
+  background: var(--text-disabled);
+}
+
+.markDotLit {
+  background: var(--text-primary);
+}
+
+.brandText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.brandMark {
+  font-size: var(--text-base);
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  line-height: 1;
+  color: var(--text-primary);
+}
+
+.brandVersion {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.08em;
+  line-height: 1;
+  color: var(--text-disabled);
+}
+
+/* --- header --------------------------------------------------------------- */
+.header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg-base);
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-primary);
+  min-width: 0;
+}
+
+.breadcrumbRoot,
+.breadcrumbSep {
+  color: var(--text-disabled);
+}
+
+.headerRight {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-shrink: 0;
+}
+
+.identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  line-height: 1;
+}
+
+.identityName {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.identityRole {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-disabled);
+}
+
+.signOut {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-tertiary);
+  padding: var(--space-2) 0;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.signOut:hover {
+  color: var(--text-primary);
+}
+
+/* --- status rail ----------------------------------------------------------
+ * The instrument cluster. Readings divided by rules, each a stacked
+ * legend/value pair so the row scans as gauges rather than as a sentence of
+ * little grey words.
+ */
+.rail {
+  grid-area: rail;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg-surface);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+.railItem {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  border-right: 1px solid var(--rule);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.railItem:first-child {
+  padding-left: 0;
+}
+
+.railItem:last-child {
+  border-right: none;
+}
+
+.railLabel {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  color: var(--text-disabled);
+}
+
+.railValue {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.railValueStrong {
+  color: var(--text-primary);
+}
+
+.railValueHealthy {
+  color: var(--state-healthy);
+}
+
+.railValueWarn {
+  color: var(--state-warn);
+}
+
+.railValueFailed {
+  color: var(--state-failed);
+}
+
+.railValueDrift {
+  color: var(--state-drift);
+}
+
+.railSpacer {
+  flex: 1;
+  border-right: none;
+}
+
+/* --- navigation -----------------------------------------------------------
+ * Grouped by what the item is about, not numbered. The active item is marked
+ * three ways at once — a rule on the leading edge, brighter type, and heavier
+ * weight — none of which is a filled rectangle behind the label.
+ */
+.nav {
+  grid-area: nav;
+  border-right: 1px solid var(--rule);
+  background: var(--bg-base);
+  padding: var(--space-5) 0 var(--space-3);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.navGroup {
+  margin-bottom: var(--space-6);
+}
+
+.navGroupLabel {
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-disabled);
+  padding: 0 var(--space-4) var(--space-2);
+  margin-bottom: var(--space-1);
+  border-bottom: 1px solid var(--rule);
+}
+
+.navLink {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 7px var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  border-left: 2px solid transparent;
+  transition:
+    color var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease),
+    background var(--duration-fast) var(--ease);
+}
+
+.navLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navLink:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.navLinkActive {
+  color: var(--text-primary);
+  font-weight: 600;
+  border-left-color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* The only counts in the navigation. Square because they are readings, not tags. */
+.navBadge {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 5px;
+  color: var(--text-tertiary);
+  border: 1px solid var(--rule-strong);
+}
+
+.navBadgeAlert {
+  color: var(--state-failed);
+  background: var(--state-failed-dim);
+  border-color: color-mix(in srgb, var(--state-failed) 34%, transparent);
+}
+
+.navBadgeDrift {
+  color: var(--state-drift);
+  background: var(--state-drift-dim);
+  border-color: color-mix(in srgb, var(--state-drift) 34%, transparent);
+}
+
+.navFooter {
+  margin-top: auto;
+  padding: var(--space-3) var(--space-4) 0;
+  border-top: 1px solid var(--rule);
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-disabled);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.navFooter a {
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.navFooter a:hover {
+  color: var(--text-secondary);
+}
+
+/* --- content --------------------------------------------------------------- */
+.content {
+  grid-area: content;
+  overflow-y: auto;
+  padding: var(--space-8);
+  background: var(--bg-base);
+}
+
+/* Wide screens get more margin, not wider text. Ledgers stay left-aligned so their
+ * columns land in the same place regardless of monitor width. */
+@media (min-width: 1680px) {
+  .content {
+    padding: var(--space-10) var(--space-12);
+  }
+}
+
+/* Narrow screens: the console is a desktop tool, but it must not become unusable.
+ * The navigation becomes a horizontal index strip rather than collapsing behind a
+ * menu, because hiding navigation on an operations tool costs a tap during an
+ * incident. */
+@media (max-width: 980px) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      'brand'
+      'header'
+      'rail'
+      'nav'
+      'content';
+    grid-template-rows: auto auto auto auto 1fr;
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .brand {
+    height: var(--header-height);
+    border-right: none;
+  }
+
+  .nav {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: var(--space-1);
+    border-right: none;
+    border-bottom: 1px solid var(--rule);
+    padding: var(--space-2) var(--space-4);
+    overflow-x: auto;
+  }
+
+  .navGroup {
+    display: contents;
+  }
+
+  .navGroupLabel {
+    display: none;
+  }
+
+  .navLink {
+    border-left: none;
+    border-bottom: 2px solid transparent;
+    padding: var(--space-2) var(--space-3);
+    white-space: nowrap;
+  }
+
+  .navLinkActive {
+    border-left: none;
+    border-bottom-color: var(--text-primary);
+  }
+
+  .navFooter {
+    display: none;
+  }
+
+  .header {
+    padding: 0 var(--space-4);
+  }
+
+  .rail {
+    padding: 0 var(--space-4);
+  }
+
+  .content {
+    padding: var(--space-5) var(--space-4);
+  }
+}
