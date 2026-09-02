@@ -1,0 +1,62 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+vendor/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+yarn-error.log*
+
+# Environment — never commit real values
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Terraform / OpenTofu
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+.terraform.lock.hcl
+
+# Kubernetes / Helm
+deployments/helm/**/charts/
+deployments/helm/**/*.tgz
+kubeconfig
+*.kubeconfig
+
+# Local runtime artifacts
+/tmp/
+/.nexus/
+*.log
+*.pid
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
