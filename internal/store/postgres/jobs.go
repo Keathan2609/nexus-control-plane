@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Keathan2609/nexus/internal/core/domain"
+	"github.com/Keathan2609/nexus/internal/core/events"
+	"github.com/Keathan2609/nexus/internal/core/outbox"
 	"github.com/Keathan2609/nexus/internal/platform/database"
 )
 
@@ -244,7 +246,11 @@ func (s *JobStore) Complete(ctx context.Context, jobID domain.ID, workerID strin
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var attempt int
+	var (
+		attempt int
+		runID   domain.ID
+		stepKey string
+	)
 	err = tx.QueryRow(ctx,
 		`UPDATE jobs
 		    SET state = 'SUCCEEDED',
@@ -252,8 +258,8 @@ func (s *JobStore) Complete(ctx context.Context, jobID domain.ID, workerID strin
 		        worker_id = NULL,
 		        lease_expires_at = NULL
 		  WHERE id = $1 AND worker_id = $2 AND state = 'RUNNING'
-		  RETURNING attempt`,
-		jobID, workerID).Scan(&attempt)
+		  RETURNING attempt, run_id, step_key`,
+		jobID, workerID).Scan(&attempt, &runID, &stepKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotOwner
 	}
@@ -265,6 +271,13 @@ func (s *JobStore) Complete(ctx context.Context, jobID domain.ID, workerID strin
 		`UPDATE job_attempts SET state='SUCCEEDED', finished_at=now()
 		  WHERE job_id=$1 AND attempt=$2`, jobID, attempt); err != nil {
 		return fmt.Errorf("close attempt: %w", err)
+	}
+
+	// The event goes into the outbox in the same transaction as the state change, so
+	// the console cannot be told a step finished by a transaction that then rolled back.
+	if err := outbox.Write(ctx, tx, events.New(events.JobCompleted, "job", jobID,
+		map[string]any{"run_id": runID.String(), "step_key": stepKey, "attempt": attempt})); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -285,6 +298,8 @@ func (s *JobStore) Fail(ctx context.Context, jobID domain.ID, workerID, code, me
 	var (
 		newState string
 		attempt  int
+		runID    domain.ID
+		stepKey  string
 	)
 	err = tx.QueryRow(ctx,
 		`UPDATE jobs
@@ -298,8 +313,9 @@ func (s *JobStore) Fail(ctx context.Context, jobID domain.ID, workerID, code, me
 		        error_code = $3,
 		        error_message = $4
 		  WHERE id = $1 AND worker_id = $2 AND state = 'RUNNING'
-		  RETURNING state, attempt`,
-		jobID, workerID, code, message, backoff.Seconds()).Scan(&newState, &attempt)
+		  RETURNING state, attempt, run_id, step_key`,
+		jobID, workerID, code, message, backoff.Seconds()).
+		Scan(&newState, &attempt, &runID, &stepKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, ErrNotOwner
 	}
@@ -312,6 +328,20 @@ func (s *JobStore) Fail(ctx context.Context, jobID domain.ID, workerID, code, me
 		    SET state='FAILED', finished_at=now(), error_code=$3, error_message=$4
 		  WHERE job_id=$1 AND attempt=$2`, jobID, attempt, code, message); err != nil {
 		return false, fmt.Errorf("close attempt: %w", err)
+	}
+
+	// A requeued job and a terminally failed one are different events, because they
+	// mean different things to anyone watching: one is the system working, the other
+	// is a step that is not going to succeed.
+	evt := events.JobFailed
+	if newState == "QUEUED" {
+		evt = events.JobRetrying
+	}
+	if err := outbox.Write(ctx, tx, events.New(evt, "job", jobID, map[string]any{
+		"run_id": runID.String(), "step_key": stepKey,
+		"attempt": attempt, "error_code": code, "error_message": message,
+	})); err != nil {
+		return false, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {

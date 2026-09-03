@@ -22,6 +22,7 @@ import (
 	"github.com/Keathan2609/nexus/internal/platform/database"
 	"github.com/Keathan2609/nexus/internal/platform/logging"
 	"github.com/Keathan2609/nexus/internal/platform/telemetry"
+	"github.com/Keathan2609/nexus/internal/scheduler"
 	"github.com/Keathan2609/nexus/internal/store/postgres"
 	"github.com/Keathan2609/nexus/internal/workers"
 )
@@ -83,6 +84,17 @@ func run() error {
 		ShutdownGrace: 30 * time.Second,
 	}
 	worker := workers.New(wcfg, db, jobs, router, log, metrics)
+
+	// Releasing a job's dependents the moment it finishes, rather than on the
+	// reconciler's next tick. The reconciler still advances every active run on its own
+	// schedule, so this is latency, not correctness.
+	sched := scheduler.New(db, postgres.NewRunStore(db), jobs)
+	worker.OnFinish(func(ctx context.Context, runID domain.ID) {
+		if _, err := sched.Advance(ctx, runID); err != nil {
+			log.Debug("could not advance the run after a job finished",
+				logging.FieldRunID, runID.String(), logging.FieldError, err)
+		}
+	})
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))

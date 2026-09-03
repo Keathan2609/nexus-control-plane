@@ -51,6 +51,18 @@ type Config struct {
 	ShutdownGrace time.Duration
 }
 
+// OnJobFinished is called after a job result has been recorded.
+//
+// This is the fast path that releases a job's dependents. Without it the run would not
+// advance until the reconciler's next tick, which turns a nine-step pipeline of one-second
+// steps into a nine-tick pipeline - the work takes seconds and the run takes a minute.
+//
+// It is not the only path. The reconciler advances every active run on its own schedule
+// regardless, so a worker that dies between reporting a result and calling this costs a
+// tick of latency rather than a stalled run. Advance is idempotent and level-triggered,
+// so calling it from several places concurrently is safe by construction.
+type OnJobFinished func(ctx context.Context, runID domain.ID)
+
 func DefaultConfig(workerID string) Config {
 	return Config{
 		WorkerID:      workerID,
@@ -69,6 +81,7 @@ type Worker struct {
 	executor Executor
 	log      *slog.Logger
 	metrics  *telemetry.Metrics
+	onFinish OnJobFinished
 
 	active sync.WaitGroup
 	// inFlight counts jobs currently executing, for the metrics gauge and for tests.
@@ -78,6 +91,20 @@ type Worker struct {
 
 func New(cfg Config, db *database.DB, jobs *postgres.JobStore, executor Executor, log *slog.Logger, m *telemetry.Metrics) *Worker {
 	return &Worker{cfg: cfg, db: db, jobs: jobs, executor: executor, log: log, metrics: m}
+}
+
+// OnFinish registers the callback invoked once a job result has been durably recorded.
+func (w *Worker) OnFinish(fn OnJobFinished) { w.onFinish = fn }
+
+// advance notifies the scheduler that a run may have work to release. Failures here are
+// deliberately silent: the reconciler is the guarantee, this is only the accelerator.
+func (w *Worker) advance(runID domain.ID) {
+	if w.onFinish == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w.onFinish(ctx, runID)
 }
 
 // Register records the worker so the console can show the fleet. Registration is
@@ -266,6 +293,7 @@ func (w *Worker) runJob(job postgres.ClaimedJob) {
 		if w.metrics != nil {
 			w.metrics.ObserveJob(job.Type, "SUCCEEDED", elapsed)
 		}
+		w.advance(job.RunID)
 
 	default:
 		code, message := classify(err)
@@ -293,6 +321,7 @@ func (w *Worker) runJob(job postgres.ClaimedJob) {
 		if w.metrics != nil {
 			w.metrics.ObserveJob(job.Type, state, elapsed)
 		}
+		w.advance(job.RunID)
 	}
 }
 
