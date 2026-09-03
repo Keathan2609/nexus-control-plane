@@ -129,14 +129,6 @@ func (a *DockerApplier) Destroy(ctx context.Context, environmentID domain.ID) er
 	return nil
 }
 
-// HealthTarget is the URL the verifier should probe for an environment.
-func (a *DockerApplier) HealthTarget(environmentID domain.ID, path string) string {
-	if path == "" {
-		path = "/healthz"
-	}
-	return "http://" + a.HostBindAddr + ":" + strconv.Itoa(a.PortFor(environmentID)) + path
-}
-
 func run(ctx context.Context, name string, args ...string) error {
 	_, err := output(ctx, name, args...)
 	return err
@@ -191,4 +183,16 @@ func (n *NoopApplier) SetObserved(environmentID domain.ID, revision string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.revision[environmentID] = revision
+}
+
+// HealthTarget is the published host port for this environment's container.
+func (a *DockerApplier) HealthTarget(d Desired, path string) string {
+	return a.healthTarget(d.EnvironmentID, path)
+}
+
+func (a *DockerApplier) healthTarget(environmentID domain.ID, path string) string {
+	if path == "" {
+		path = "/healthz"
+	}
+	return "http://" + a.HostBindAddr + ":" + strconv.Itoa(a.PortFor(environmentID)) + path
 }

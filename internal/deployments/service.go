@@ -37,6 +37,11 @@ type Desired struct {
 	Port          int
 	Replicas      int
 	Manifests     string
+	// NodePort is the host-reachable port the workload is published on. Kubernetes has
+	// no route from the control plane to a pod otherwise, and health verification has to
+	// reach the application itself rather than settle for asking the cluster whether it
+	// thinks the pod is ready.
+	NodePort int
 }
 
 // Applier turns desired state into running state.
@@ -51,6 +56,18 @@ type Applier interface {
 	// last applied. That difference is drift.
 	Observe(ctx context.Context, environmentID domain.ID) (string, error)
 	Destroy(ctx context.Context, environmentID domain.ID) error
+}
+
+// HealthTargeter is implemented by appliers that know where the workload they just
+// applied can be reached.
+//
+// It is optional rather than part of Applier because the answer is provider-specific in
+// a way the lifecycle should not know about: the Docker applier publishes a port on the
+// host, Kubernetes publishes a node port, and a future applier behind an ingress would
+// answer with a hostname. An applier that does not implement it falls back to the
+// environment's configured URL.
+type HealthTargeter interface {
+	HealthTarget(d Desired, path string) string
 }
 
 type ProbeResult struct {
@@ -253,7 +270,7 @@ func (s *Service) Execute(ctx context.Context, id domain.ID) error {
 		return err
 	}
 
-	if err := s.verify(ctx, dep, env); err != nil {
+	if err := s.verify(ctx, dep, env, desired); err != nil {
 		log.Warn("verification failed", logging.FieldError, err)
 		return s.fail(ctx, dep, started, env, err)
 	}
@@ -301,7 +318,7 @@ func (s *Service) Execute(ctx context.Context, id domain.ID) error {
 
 // verify probes the target until it passes RequiredPasses times consecutively, or until
 // the budget runs out. Every probe is persisted.
-func (s *Service) verify(ctx context.Context, dep *Deployment, env *Environment) error {
+func (s *Service) verify(ctx context.Context, dep *Deployment, env *Environment, desired Desired) error {
 	if err := s.setState(ctx, dep, domain.DeployVerifying); err != nil {
 		return err
 	}
@@ -309,7 +326,16 @@ func (s *Service) verify(ctx context.Context, dep *Deployment, env *Environment)
 	vctx, cancel := context.WithTimeout(ctx, s.Verification.Timeout)
 	defer cancel()
 
-	target := env.URL
+	// Where to probe is the applier's question, because only it knows how the workload
+	// it just created is exposed. The environment URL is the fallback for appliers that
+	// do not publish anything themselves.
+	target := ""
+	if t, ok := s.Applier.(HealthTargeter); ok {
+		target = t.HealthTarget(desired, "/healthz")
+	}
+	if target == "" {
+		target = env.URL
+	}
 	if target == "" {
 		target = fmt.Sprintf("http://localhost:%d/healthz", env.Port)
 	}

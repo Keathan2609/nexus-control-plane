@@ -69,9 +69,12 @@ func run() error {
 	sched := scheduler.New(db, runs, jobs)
 	relay := outbox.NewRelay(db, publisher)
 
-	deploySvc := deployments.NewService(db,
-		deployments.NewDockerApplier("nexus_default"),
+	applier, provider := deployments.NewApplier(ctx,
+		deployments.Provider(cfg.DeployProvider),
+		cfg.KubeContext, cfg.KindCluster, "nexus_default", log)
+	deploySvc := deployments.NewService(db, applier,
 		deployments.NewHTTPProber(5*time.Second), log, metrics)
+	log.Info("deployment provider selected", "provider", string(provider))
 
 	rcfg := reconciler.DefaultConfig()
 	rcfg.Interval = cfg.ReconcileInterval

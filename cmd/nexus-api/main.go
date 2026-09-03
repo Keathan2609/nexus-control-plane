@@ -143,9 +143,12 @@ func run() error {
 	authSvc := auth.NewService(db, cfg.JWTSecretOrDevDefault(), cfg.TokenTTL)
 	auditor := audit.NewRecorder(db)
 
-	applier := deployments.NewDockerApplier("nexus_default")
+	applier, provider := deployments.NewApplier(ctx,
+		deployments.Provider(cfg.DeployProvider),
+		cfg.KubeContext, cfg.KindCluster, "nexus_default", log)
 	deploySvc := deployments.NewService(db, applier,
 		deployments.NewHTTPProber(5*time.Second), log, metrics)
+	log.Info("deployment provider selected", "provider", string(provider))
 
 	server := v1.NewServer(v1.Deps{
 		Config: cfg, DB: db, Log: log, Metrics: metrics,

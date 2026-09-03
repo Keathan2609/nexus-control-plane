@@ -42,6 +42,15 @@ type Config struct {
 	OutboxBatchSize   int
 	OutboxInterval    time.Duration
 
+	// DeployProvider selects how deployments are made real: "docker" runs containers on
+	// the local daemon, "kubernetes" applies manifests to a cluster. Both are real; they
+	// differ in what they target, not in whether they actually deploy.
+	DeployProvider string
+	KubeContext    string
+	KindCluster    string
+	// ImageRepository is the local repository built images are tagged into.
+	ImageRepository string
+
 	// AutoMigrate applies pending migrations at startup. On by default because a local
 	// stack should come up with one command; the Helm chart turns it off and runs
 	// migrations as a pre-install job instead.
@@ -79,6 +88,11 @@ func Load(serviceName string) (Config, error) {
 		OutboxBatchSize:   envInt("NEXUS_OUTBOX_BATCH_SIZE", 128),
 		OutboxInterval:    envDuration("NEXUS_OUTBOX_INTERVAL", time.Second),
 
+		DeployProvider:  strings.ToLower(env("NEXUS_DEPLOY_PROVIDER", "docker")),
+		KubeContext:     os.Getenv("NEXUS_KUBE_CONTEXT"),
+		KindCluster:     env("NEXUS_KIND_CLUSTER", "nexus-local"),
+		ImageRepository: env("NEXUS_IMAGE_REPOSITORY", "nexus-demo"),
+
 		AutoMigrate: envBool("NEXUS_AUTO_MIGRATE", true),
 		CORSOrigins: envList("NEXUS_CORS_ORIGINS", []string{"http://localhost:3100"}),
 	}
@@ -107,6 +121,11 @@ func (c Config) Validate() error {
 		// A lease shorter than a few multiples of the heartbeat interval will be reaped
 		// out from under a healthy worker.
 		return fmt.Errorf("NEXUS_WORKER_LEASE_SECONDS must be at least 5, got %d", c.WorkerLeaseSeconds)
+	}
+	switch c.DeployProvider {
+	case "docker", "kubernetes":
+	default:
+		return fmt.Errorf("NEXUS_DEPLOY_PROVIDER must be docker or kubernetes, got %q", c.DeployProvider)
 	}
 	if c.TraceSampleRate < 0 || c.TraceSampleRate > 1 {
 		return fmt.Errorf("NEXUS_TRACE_SAMPLE_RATE must be between 0 and 1, got %v", c.TraceSampleRate)
