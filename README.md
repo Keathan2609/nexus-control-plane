@@ -404,13 +404,16 @@ Implemented and verified in this pass:
 | **Logging** | Structured redaction by marker, so `auth_token`, `client_secret`, `set-cookie` and similar never reach output — with measurement suffixes excluded so `token_count` stays readable. |
 | **Errors** | Structured and safe. No SQL, driver text, stack traces or filesystem paths reach a client; a test asserts it. |
 | **HTTP** | Strict CSP, `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, explicit CORS allowlist that never reflects an arbitrary origin. |
-| **Containers** | Multi-stage builds, distroless for the API and reconciler, non-root numeric UIDs, pinned bases. Trivy: **0 HIGH/CRITICAL**. |
+| **Containers** | Multi-stage builds, distroless for the API and reconciler, non-root numeric UIDs, pinned bases. Trivy: **0 HIGH/CRITICAL across all four images**. |
 | **Kubernetes** | `runAsNonRoot` with a numeric UID, `allowPrivilegeEscalation: false`, read-only root filesystem, all capabilities dropped, `seccompProfile: RuntimeDefault`, resource requests and limits. |
 | **Supply chain** | Actions pinned to commit SHAs, least-privilege workflow permissions, dependency and container scanning, SBOM generation, secret scanning over full history. |
 | **Audit trail** | Append-only, enforced by table permissions rather than convention. Records actions and actors — never secret values. |
 
 Scans at the time of writing: `gitleaks` clean over all history, `govulncheck` 0 called
-vulnerabilities, `npm audit` 0, Trivy 0 HIGH/CRITICAL on both images.
+vulnerabilities, `npm audit` 0, Trivy 0 HIGH/CRITICAL across all four runtime images
+(api, worker, reconciler, web). The console image did carry real findings — its base
+image's unused, globally-installed `npm` CLI, not the application — fixed by removing
+it; see [docs/reliability.md](docs/reliability.md).
 
 The demo credentials below are **local demonstration credentials only** and are
 documented as such. They are not production authentication.

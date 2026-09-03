@@ -218,6 +218,12 @@ jobs:
       packages: write
       security-events: write
     strategy:
+      # One matrix member's failure must not hide the other three. Trivy finding a real
+      # HIGH/CRITICAL in the reconciler image says nothing about whether the API, worker
+      # or web images are also affected, and the default fail-fast cancels them before
+      # they can answer that. Turning it off costs nothing when every leg is healthy and
+      # gives the complete picture the one time it is not.
+      fail-fast: false
       matrix:
         image:
           - nexus-api
@@ -239,11 +245,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The one canonical image identity every later step scans, builds and records
+      # against. GitHub Container Registry rejects uppercase in a repository path — the
+      # OCI reference spec requires lowercase — and github.repository_owner is the
+      # account's display case ("Keathan2609"), not normalised. docker/metadata-action
+      # lowercases automatically for its own tags; Trivy and Syft do not, because they
+      # were never told to build the reference themselves in the first place. They were
+      # reconstructing it independently from the raw, uppercase owner, which produced a
+      # reference Trivy's own parser rejected before it ever tried to reach the
+      # registry: "could not parse reference: ghcr.io/Keathan2609/nexus-reconciler:...".
+      # Resolving it once here and threading it through removes the second copy that
+      # could disagree with the first.
+      - name: Resolve canonical image repository
+        id: image
+        run: |
+          echo "repository=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          images: ${{ steps.image.outputs.repository }}
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
@@ -251,6 +273,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push (main) or build only (PR)
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -262,31 +285,52 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
 
+      # image@digest, not image:tag. A tag can move; this build's own content-addressed
+      # digest cannot, so it is the one reference guaranteed to name exactly what was
+      # just built and pushed rather than whatever a tag happens to point at by the time
+      # the scanner runs.
       - name: Run Trivy vulnerability scan
+        id: trivy
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+          image-ref: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
           format: sarif
           output: ${{ matrix.image }}-trivy.sarif
+          severity: HIGH,CRITICAL
+          # A HIGH or CRITICAL finding fails this step, and nothing here catches that
+          # failure — it propagates to the job and then to the success gate. The SARIF
+          # upload and SBOM steps below still run: enforcement failing is not a reason
+          # to also discard the report that says why.
+          exit-code: '1'
 
       - name: Upload Trivy results to Security tab
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        # !cancelled() rather than always(): still runs after Trivy fails on a genuine
+        # finding, so the result reaches the Security tab instead of being discarded
+        # with the step that found it. Skips only if the job itself was cancelled, when
+        # there is nothing to upload.
+        if: >-
+          !cancelled() &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: ${{ matrix.image }}-trivy.sarif
           category: trivy-${{ matrix.image }}
 
       - name: Generate SBOM with syft
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          !cancelled() &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
-          image: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+          image: ${{ steps.image.outputs.repository }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: ${{ matrix.image }}-sbom.json
 
       - name: Upload SBOM artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          !cancelled() &&
+          github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-${{ matrix.image }}

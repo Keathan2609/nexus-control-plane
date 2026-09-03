@@ -193,8 +193,8 @@ permissions, and scans dependencies, containers and the full git history for sec
 every push.
 
 At the time of writing: gitleaks clean across all history, govulncheck reports no called
-vulnerabilities, npm audit reports none, and Trivy reports no HIGH or CRITICAL findings in
-either image.
+vulnerabilities, npm audit reports none, and Trivy reports no HIGH or CRITICAL findings
+across all four runtime images.
 
 ## Tech stack
 

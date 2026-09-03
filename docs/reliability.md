@@ -148,6 +148,26 @@ a command line when the image contains no shell, no `wget` and no `curl`. The bi
 probes itself through a `-healthcheck` flag instead, which adds nothing to the image and
 exercises the address the server is actually bound to.
 
+**Trivy and Syft were reconstructing the image reference themselves, and got it wrong.**
+`docker/metadata-action` normalises the registry path to lowercase for its own tags —
+GHCR rejects uppercase, per the OCI spec — but the vulnerability scan and SBOM steps
+built their own reference from the raw `github.repository_owner`, which is the account's
+display case. The result was syntactically invalid: Trivy's own parser rejected it
+before it ever reached the registry — `could not parse reference:
+ghcr.io/Keathan2609/nexus-reconciler:...` — which failed the build for every matrix
+image, not just the one whose scan was actually running. There is now exactly one
+resolved, lowercased repository, and the build's own content digest — not a second,
+independently-guessed tag — is what both Trivy and Syft scan.
+
+**The console's base image carried a CRITICAL and ten HIGH findings it never used.**
+`node:22-alpine` ships a global `npm` install for interactive use, complete with its own
+vendored dependencies — `tar`, `pacote`, `sigstore` and others. The console's runtime
+never invokes `npm`; the entrypoint is `node server.js` against Next.js's own standalone
+output. Trivy traced every one of the eleven findings to
+`usr/local/lib/node_modules/npm/node_modules/...` — none to the application's own
+dependencies. Removing the unused CLI removed the vulnerable code with it, rather than
+carrying exposure the image had no reason to have in the first place.
+
 **A relative `--file` resolved against the wrong directory.** Docker resolves it against
 the process working directory, not the build context, so a worker running from the
 repository root looked for a Dockerfile at the root and failed. It is now joined to the
