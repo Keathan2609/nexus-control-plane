@@ -7,6 +7,18 @@ else.
 
 ## Starting
 
+There are two paths, and which one you want depends on whether you are demonstrating the
+system or changing it.
+
+**The whole system in containers.** One command, nothing on the host but Docker:
+
+```bash
+docker compose -f deployments/docker/docker-compose.yml up -d --build
+```
+
+**Backing services in Docker, binaries on the host.** Slower to start the first time,
+much faster to iterate, because a rebuild is `go build` rather than a Docker layer:
+
 ```powershell
 .\scripts\dev.ps1 up      # Windows
 ```

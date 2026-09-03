@@ -1,19 +1,41 @@
-# NEXUS local development stack.
+# NEXUS local stack.
 #
-# Host ports are deliberately offset from the defaults (Postgres on 5436 rather than
-# 5432, Prometheus on 9091 rather than 9090) so this stack can run alongside other
-# projects on the same machine without a port collision. Container-internal ports are
-# the conventional ones.
+# The whole system, including the control plane itself:
 #
-#   docker compose -f deployments/docker/docker-compose.yml up -d
+#   docker compose -f deployments/docker/docker-compose.yml up -d --build
 #
-# Bring up only the backing services while developing the Go binaries on the host:
+# Backing services only, for developing the Go binaries on the host:
 #
 #   docker compose -f deployments/docker/docker-compose.yml up -d postgres nats
+#
+# Host ports are deliberately offset from the defaults (Postgres on 5436 rather than
+# 5432, Prometheus on 9091 rather than 9090) so this stack runs alongside other projects
+# on the same machine. Container-internal ports are the conventional ones.
 
 name: nexus
 
+# Common configuration for the three Go services. They differ in almost nothing but
+# their entrypoint, so the shared half is defined once.
+x-control-plane: &control-plane
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    nats:
+      condition: service_started
+  environment: &control-plane-env
+    NEXUS_DATABASE_URL: postgres://nexus:nexus@postgres:5432/nexus?sslmode=disable
+    NEXUS_NATS_URL: nats://nats:4222
+    NEXUS_ENVIRONMENT: development
+    NEXUS_LOG_LEVEL: info
+    NEXUS_LOG_FORMAT: json
+    NEXUS_METRICS_ADDR: ":9090"
+    NEXUS_OTEL_ENDPOINT: http://jaeger:4318
+    NEXUS_CORS_ORIGINS: http://localhost:3100
+
 services:
+  # --- backing services -----------------------------------------------------
+
   postgres:
     image: postgres:16-alpine
     container_name: nexus-postgres
@@ -21,8 +43,8 @@ services:
       POSTGRES_USER: nexus
       POSTGRES_PASSWORD: nexus
       POSTGRES_DB: nexus
-      # Deterministic collation so ORDER BY on text columns behaves identically here and
-      # in CI, where the base image locale may differ.
+      # Deterministic collation so ORDER BY on text behaves identically here and in CI,
+      # where the base image locale may differ.
       POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
     ports:
       - "5436:5432"
@@ -41,13 +63,10 @@ services:
     container_name: nexus-nats
     # JetStream is what makes NATS durable rather than fire-and-forget. -sd sets the
     # store directory so streams survive a container restart.
-    command:
-      - "-js"
-      - "-sd=/data"
-      - "-m=8222"
+    command: ["-js", "-sd=/data", "-m=8222"]
     ports:
-      - "4222:4222"   # client
-      - "8222:8222"   # monitoring / healthz
+      - "4222:4222"
+      - "8222:8222"
     volumes:
       - nexus-nats-data:/data
     healthcheck:
@@ -57,6 +76,120 @@ services:
       retries: 20
       start_period: 3s
     restart: unless-stopped
+
+  # --- control plane ---------------------------------------------------------
+
+  # Migrations and demo data run once, before anything that reads them.
+  #
+  # A separate one-shot service rather than an init step inside the API, because with
+  # several API replicas the seed would otherwise race with itself. It is idempotent
+  # regardless, but expressing it as an ordering constraint is clearer than relying on
+  # that.
+  seed:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.seed
+    image: nexus-seed:dev
+    container_name: nexus-seed
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NEXUS_DATABASE_URL: postgres://nexus:nexus@postgres:5432/nexus?sslmode=disable
+      NEXUS_ENVIRONMENT: development
+      NEXUS_LOG_FORMAT: text
+    restart: "no"
+
+  api:
+    <<: *control-plane
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.api
+    image: nexus-api:dev
+    container_name: nexus-api
+    environment:
+      <<: *control-plane-env
+      NEXUS_HTTP_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+      - "9095:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/nexus-api", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Two workers, so job claiming is genuinely contended rather than theoretically so.
+  # Killing one demonstrates lease recovery with the other still running.
+  worker-1:
+    <<: *control-plane
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.worker
+    image: nexus-worker:dev
+    container_name: nexus-worker-1
+    environment:
+      <<: *control-plane-env
+      NEXUS_WORKER_ID: wkr_compose_1
+      NEXUS_WORKER_CONCURRENCY: "4"
+    ports:
+      - "9096:9090"
+
+  worker-2:
+    <<: *control-plane
+    image: nexus-worker:dev
+    container_name: nexus-worker-2
+    environment:
+      <<: *control-plane-env
+      NEXUS_WORKER_ID: wkr_compose_2
+      NEXUS_WORKER_CONCURRENCY: "4"
+    ports:
+      - "9098:9090"
+    depends_on:
+      worker-1:
+        condition: service_started
+
+  # One replica, deliberately. The reconciler has no leader election, and its loops are
+  # idempotent conditional statements, so a second copy would be safe but pointless.
+  reconciler:
+    <<: *control-plane
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.reconciler
+    image: nexus-reconciler:dev
+    container_name: nexus-reconciler
+    environment:
+      <<: *control-plane-env
+      NEXUS_RECONCILE_INTERVAL: 10s
+    ports:
+      - "9097:9090"
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/Dockerfile.web
+      args:
+        # Compiled into the client bundle, because the browser is what reaches the API.
+        # It is therefore the host-visible URL, not the compose service name.
+        NEXT_PUBLIC_API_URL: http://localhost:8080
+    image: nexus-web:dev
+    container_name: nexus-web
+    ports:
+      - "3100:3000"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  # --- observability ----------------------------------------------------------
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -79,8 +212,8 @@ services:
     ports:
       - "3300:3000"
     environment:
-      # Local development only: anonymous read access removes a login step that adds
-      # nothing on a laptop. The Helm chart does not do this.
+      # Local development only. Anonymous access removes a login step that adds nothing
+      # on a laptop; the Helm chart does not do this.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
@@ -99,8 +232,8 @@ services:
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      - "16687:16686"   # UI
-      - "4319:4318"     # OTLP/HTTP
+      - "16687:16686"
+      - "4319:4318"
     restart: unless-stopped
 
 volumes:

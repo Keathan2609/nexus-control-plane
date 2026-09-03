@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,10 +29,44 @@ import (
 )
 
 func main() {
+	// A distroless image has no shell, no wget and no curl, so a container healthcheck
+	// cannot be a command line. Having the binary probe itself is the standard answer:
+	// nothing has to be added to the image, and the check exercises the same address the
+	// server is actually bound to.
+	if len(os.Args) > 1 && os.Args[1] == "-healthcheck" {
+		if err := healthcheck(); err != nil {
+			fmt.Fprintf(os.Stderr, "unhealthy: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "nexus-api: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// healthcheck probes the local readiness endpoint and reports through the exit code.
+func healthcheck() error {
+	addr := os.Getenv("NEXUS_HTTP_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/readyz")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("readiness returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func run() error {

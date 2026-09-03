@@ -1,0 +1,35 @@
+# nexus-seed — applies migrations and writes the demonstration estate.
+#
+# A separate image rather than a flag on the API, so the compose stack can express
+# "seed, then start" as an ordering constraint instead of relying on every API replica
+# racing to do the same idempotent work.
+#
+#   docker build -f deployments/docker/Dockerfile.seed -t nexus-seed .
+
+FROM golang:1.27-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o /out/nexus-seed ./cmd/nexus-seed
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/nexus-seed /usr/local/bin/nexus-seed
+
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/nexus-seed"]
+
+LABEL org.opencontainers.image.title="nexus-seed" \
+      org.opencontainers.image.description="NEXUS schema migration and demo data" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.licenses="MIT"

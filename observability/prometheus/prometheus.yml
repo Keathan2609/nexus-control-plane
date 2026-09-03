@@ -1,3 +1,10 @@
+# Scrape configuration for the local stack.
+#
+# Targets are compose service names, because the full stack runs in compose. When the Go
+# binaries are run on the host instead (scripts/dev), the equivalent targets are
+# host.docker.internal on the mapped ports - those jobs are kept below, commented, rather
+# than deleted, because switching between the two is a normal thing to do while working.
+
 global:
   scrape_interval: 10s
   evaluation_interval: 15s
@@ -7,19 +14,28 @@ global:
 scrape_configs:
   - job_name: nexus-api
     static_configs:
-      - targets: ["host.docker.internal:9090"]
-        labels:
-          component: api
+      - targets: ["api:9090"]
+        labels: { component: api }
+
   - job_name: nexus-worker
     static_configs:
-      - targets: ["host.docker.internal:9092", "host.docker.internal:9093"]
-        labels:
-          component: worker
+      - targets: ["worker-1:9090", "worker-2:9090"]
+        labels: { component: worker }
+
   - job_name: nexus-reconciler
     static_configs:
-      - targets: ["host.docker.internal:9094"]
-        labels:
-          component: reconciler
+      - targets: ["reconciler:9090"]
+        labels: { component: reconciler }
+
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
+
+  # Host-run processes (scripts/dev up):
+  # - job_name: nexus-host
+  #   static_configs:
+  #     - targets:
+  #         - "host.docker.internal:9095"   # api
+  #         - "host.docker.internal:9096"   # worker-1
+  #         - "host.docker.internal:9097"   # reconciler
+  #         - "host.docker.internal:9098"   # worker-2

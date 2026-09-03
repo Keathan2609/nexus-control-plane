@@ -119,17 +119,28 @@ GitHub Actions
 
 ## Quick start
 
-**Requires:** Docker Desktop, Go 1.27+, Node 20+. Nothing else, and no cloud account.
+**Requires:** Docker Desktop. Nothing else, and no cloud account. Go 1.27+ and Node 20+
+only if you intend to work on the code.
 
 ```bash
 git clone https://github.com/Keathan2609/nexus.git
 cd nexus
-./scripts/dev up
+docker compose -f deployments/docker/docker-compose.yml up -d --build
 ```
 
-That brings up PostgreSQL, NATS, Prometheus, Grafana and Jaeger, applies migrations,
-seeds a demonstration estate, and starts the API, a worker, the reconciler and the
-console.
+That builds all five images and brings up the entire system: PostgreSQL, NATS,
+Prometheus, Grafana and Jaeger, then a one-shot job that applies migrations and seeds a
+demonstration estate, then the API, two workers, the reconciler and the console. Two
+workers rather than one, so job claiming is genuinely contended and killing one
+demonstrates lease recovery with the other still running.
+
+To develop against it instead — backing services in Docker, the Go binaries on the host
+with a fast rebuild loop:
+
+```powershell
+.\scripts\dev.ps1 up      # Windows
+./scripts/dev up           # macOS, Linux, Git Bash, WSL
+```
 
 Then open **http://localhost:3100** and sign in:
 
@@ -146,6 +157,8 @@ Then open **http://localhost:3100** and sign in:
 | Console | http://localhost:3100 | |
 | API | http://localhost:8080 | `/healthz`, `/readyz` |
 | API metrics | http://localhost:9095/metrics | Prometheus format |
+| Worker metrics | http://localhost:9096, :9098 | One per worker |
+| Reconciler metrics | http://localhost:9097/metrics | |
 | PostgreSQL | `localhost:5436` | user/password/db `nexus` |
 | NATS | `localhost:4222` | monitoring on 8222 |
 | Prometheus | http://localhost:9091 | |
