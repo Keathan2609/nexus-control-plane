@@ -92,17 +92,27 @@ func (s *Server) Routes() http.Handler {
 
 	// Webhooks authenticate by signature, not by bearer token, so they are mounted
 	// before the authenticated group.
+	//
+	// The endpoint is unauthenticated and publicly reachable, so it carries its own
+	// limiter. Signature verification rejects a forged delivery, but only after reading
+	// and hashing the body; without a limit, an attacker who cannot forge a signature
+	// can still make the process do that work indefinitely. The allowance is generous
+	// because a busy repository genuinely does burst.
+	webhookLimiter := middleware.NewRateLimiter(20, 100).
+		TrustProxyHeaders(s.cfg.TrustProxyHeaders)
 	r.Route("/api/v1/webhooks", func(r chi.Router) {
-		r.Post("/github", s.wrap(s.handleGitHubWebhook))
+		r.With(webhookLimiter.Limit).Post("/github", s.wrap(s.handleGitHubWebhook))
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		loginLimiter := middleware.NewRateLimiter(1, 10)
+		loginLimiter := middleware.NewRateLimiter(1, 10).
+			TrustProxyHeaders(s.cfg.TrustProxyHeaders)
 		r.With(loginLimiter.Limit).Post("/auth/login", s.wrap(s.handleLogin))
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authenticate(s.auth))
-			apiLimiter := middleware.NewRateLimiter(50, 200)
+			apiLimiter := middleware.NewRateLimiter(50, 200).
+				TrustProxyHeaders(s.cfg.TrustProxyHeaders)
 			r.Use(apiLimiter.Limit)
 
 			r.Get("/auth/me", s.wrap(s.handleMe))

@@ -300,6 +300,10 @@ type RateLimiter struct {
 	buckets map[string]*bucket
 	rate    float64
 	burst   float64
+	// trustProxy governs whether X-Forwarded-For is believed. Off by default: a header
+	// the client controls cannot be a rate-limit key, because the client then simply
+	// varies it and every request lands in a fresh bucket with a full allowance.
+	trustProxy bool
 }
 
 type bucket struct {
@@ -307,9 +311,22 @@ type bucket struct {
 	last   time.Time
 }
 
+// maxBuckets caps how many distinct clients are tracked. The eviction loop runs every
+// few minutes, which is ample time for a burst of unique keys to exhaust memory in
+// between; refusing to grow past this bound turns that from an outage into a shared
+// allowance for whoever arrives after the cap.
+const maxBuckets = 20_000
+
 func NewRateLimiter(perSecond, burst float64) *RateLimiter {
 	rl := &RateLimiter{buckets: map[string]*bucket{}, rate: perSecond, burst: burst}
 	go rl.evictLoop()
+	return rl
+}
+
+// TrustProxyHeaders makes the limiter honour X-Forwarded-For. Enable it only when NEXUS
+// genuinely sits behind a proxy that overwrites the header, never merely appends to it.
+func (rl *RateLimiter) TrustProxyHeaders(trust bool) *RateLimiter {
+	rl.trustProxy = trust
 	return rl
 }
 
@@ -337,6 +354,12 @@ func (rl *RateLimiter) allow(key string) bool {
 
 	b, ok := rl.buckets[key]
 	if !ok {
+		if len(rl.buckets) >= maxBuckets {
+			// At capacity the limiter stops tracking new keys and refuses them. Failing
+			// closed is the right direction here: the alternative is letting an
+			// unbounded set of keys allocate without limit.
+			return false
+		}
 		rl.buckets[key] = &bucket{tokens: rl.burst - 1, last: now}
 		return true
 	}
@@ -357,7 +380,7 @@ func (rl *RateLimiter) allow(key string) bool {
 // exhaust the allowance of everyone behind the same NAT.
 func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := clientIP(r)
+		key := clientIP(r, rl.trustProxy)
 		if p, ok := auth.FromContext(r.Context()); ok {
 			key = "user:" + p.UserID.String()
 		}
@@ -374,15 +397,25 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 	})
 }
 
-func clientIP(r *http.Request) string {
-	// X-Forwarded-For is only meaningful behind a proxy that sets it. It is read here
-	// because the deployed topology puts an ingress in front, and ignored safely
-	// otherwise since the fallback is the socket address.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i > 0 {
-			return strings.TrimSpace(xff[:i])
+// clientIP identifies the caller for rate-limiting purposes.
+//
+// X-Forwarded-For is honoured only when the deployment has declared that it sits behind
+// a trusted proxy. Reading it unconditionally is a rate-limit bypass rather than a
+// convenience: the header is attacker-controlled, so a client that varies it on every
+// request never shares a bucket with itself, and the login limiter in particular stops
+// slowing down password guessing at all. The socket address cannot be forged over TCP
+// and so is the default.
+func clientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// The left-most entry is the original client, but every entry is
+			// attacker-supplied except the one the trusted proxy appended. The
+			// right-most is the only one that proxy actually observed.
+			if i := strings.LastIndexByte(xff, ','); i >= 0 {
+				return strings.TrimSpace(xff[i+1:])
+			}
+			return strings.TrimSpace(xff)
 		}
-		return strings.TrimSpace(xff)
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

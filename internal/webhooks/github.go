@@ -35,6 +35,10 @@ var (
 	ErrInvalidSignature = errors.New("webhook signature verification failed")
 	ErrDuplicate        = errors.New("webhook delivery already processed")
 	ErrUnknownRepo      = errors.New("webhook is for a repository NEXUS does not track")
+	// ErrMalformedDelivery is a delivery that cannot be identified at all. It is a
+	// client error, not a server error: answering 500 both misreports whose fault it is
+	// and tells the sender to retry something that can never succeed.
+	ErrMalformedDelivery = errors.New("webhook delivery is missing required headers")
 )
 
 // MaxPayloadBytes bounds what will be read from a delivery. GitHub caps payloads at
@@ -140,7 +144,10 @@ func (i *Ingester) Handle(ctx context.Context, r *http.Request) (*Result, error)
 	deliveryID := r.Header.Get("X-GitHub-Delivery")
 	eventType := r.Header.Get("X-GitHub-Event")
 	if deliveryID == "" || eventType == "" {
-		return nil, fmt.Errorf("missing X-GitHub-Delivery or X-GitHub-Event header")
+		return nil, ErrMalformedDelivery
+	}
+	if len(deliveryID) > 200 || len(eventType) > 100 {
+		return nil, ErrMalformedDelivery
 	}
 
 	sigErr := i.VerifySignature(body, r.Header.Get("X-Hub-Signature-256"))

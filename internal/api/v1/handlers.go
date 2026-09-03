@@ -22,6 +22,10 @@ import (
 	"github.com/Keathan2609/nexus/internal/webhooks"
 )
 
+// maxTokenDays caps an API token's lifetime at roughly a year. Long enough to be
+// practical for a CI credential, short enough that every token is rotated eventually.
+const maxTokenDays = 365
+
 // --- auth ---------------------------------------------------------------------
 
 type loginRequest struct {
@@ -102,6 +106,18 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) error
 	if strings.TrimSpace(body.Name) == "" {
 		return httpx.Validation("a token name is required",
 			httpx.FieldError{Field: "name", Message: "required"})
+	}
+	if len(body.Name) > 128 {
+		return httpx.Validation("the token could not be issued",
+			httpx.FieldError{Field: "name", Message: "must be at most 128 characters"})
+	}
+	// A lifetime is mandatory and bounded. Zero previously produced a zero TTL, and a
+	// credential that never meaningfully expires is one that outlives the person who
+	// created it and the reason it was created.
+	if body.Days < 1 || body.Days > maxTokenDays {
+		return httpx.Validation("the token could not be issued",
+			httpx.FieldError{Field: "days",
+				Message: "must be between 1 and " + strconv.Itoa(maxTokenDays)})
 	}
 	ttl := time.Duration(body.Days) * 24 * time.Hour
 
@@ -369,45 +385,129 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return notFoundOr(err, "run")
 	}
-	jobs, err := s.read.ListJobs(r.Context(), id)
+	jobs, err := s.read.ListJobs(r.Context(), p.OrganisationID, id)
 	if err != nil {
-		return httpx.Internal(err)
+		return notFoundOr(err, "run")
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"run": run, "jobs": jobs})
 	return nil
 }
 
 func (s *Server) handleRunJobs(w http.ResponseWriter, r *http.Request) error {
+	p, err := principal(r)
+	if err != nil {
+		return err
+	}
 	id, err := domain.ParseID(domain.PrefixRun, chi.URLParam(r, "runID"))
 	if err != nil {
 		return httpx.BadRequest("malformed run id")
 	}
-	jobs, err := s.read.ListJobs(r.Context(), id)
+	jobs, err := s.read.ListJobs(r.Context(), p.OrganisationID, id)
 	if err != nil {
-		return httpx.Internal(err)
+		return notFoundOr(err, "run")
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": jobs})
 	return nil
 }
 
 func (s *Server) handleJobLogs(w http.ResponseWriter, r *http.Request) error {
+	p, err := principal(r)
+	if err != nil {
+		return err
+	}
 	id, err := domain.ParseID(domain.PrefixJob, chi.URLParam(r, "jobID"))
 	if err != nil {
 		return httpx.BadRequest("malformed job id")
 	}
-	attempt, _ := strconv.Atoi(r.URL.Query().Get("attempt"))
-	logs, err := s.read.JobLogs(r.Context(), id, attempt, httpx.Limit(r, 500, 5000))
+	attempt, err := attemptParam(r)
 	if err != nil {
-		return httpx.Internal(err)
+		return err
+	}
+	logs, err := s.read.JobLogs(r.Context(), p.OrganisationID, id, attempt, httpx.Limit(r, 500, 5000))
+	if err != nil {
+		return notFoundOr(err, "job")
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": logs})
 	return nil
+}
+
+// attemptParam reads the optional attempt filter. Zero means every attempt; a negative
+// value is a client mistake rather than a filter, and is rejected instead of quietly
+// matching nothing.
+func attemptParam(r *http.Request) (int, error) {
+	raw := r.URL.Query().Get("attempt")
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, httpx.BadRequest("attempt must be a non-negative integer")
+	}
+	return n, nil
 }
 
 type triggerRunRequest struct {
 	Branch    string `json:"branch"`
 	CommitSHA string `json:"commit_sha"`
 	Message   string `json:"message"`
+}
+
+// validate bounds what a caller may put into a run.
+//
+// These values are not inert: the branch and commit reach a worker that checks out a
+// repository, and all three are persisted, rendered in the console and used to derive an
+// image tag. Length limits and a character allowlist keep a shell-shaped or
+// absurdly-long value from ever getting that far.
+func (t triggerRunRequest) validate() error {
+	var fields []httpx.FieldError
+
+	if len(t.Branch) > 255 {
+		fields = append(fields, httpx.FieldError{Field: "branch", Message: "must be at most 255 characters"})
+	} else if t.Branch != "" && !validRef(t.Branch) {
+		fields = append(fields, httpx.FieldError{Field: "branch", Message: "contains characters that are not valid in a git ref"})
+	}
+
+	if len(t.CommitSHA) > 64 {
+		fields = append(fields, httpx.FieldError{Field: "commit_sha", Message: "must be at most 64 characters"})
+	} else if t.CommitSHA != "" && !isHex(t.CommitSHA) {
+		fields = append(fields, httpx.FieldError{Field: "commit_sha", Message: "must be hexadecimal"})
+	}
+
+	if len(t.Message) > 4096 {
+		fields = append(fields, httpx.FieldError{Field: "message", Message: "must be at most 4096 characters"})
+	}
+
+	if len(fields) > 0 {
+		return httpx.Validation("the run could not be triggered", fields...)
+	}
+	return nil
+}
+
+// validRef accepts the characters git permits in a branch name and nothing else. It is
+// deliberately stricter than git itself; a legal but hostile ref is not worth supporting.
+func validRef(s string) bool {
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "/") ||
+		strings.Contains(s, "..") || strings.HasSuffix(s, "/") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '/', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) error {
@@ -419,11 +519,20 @@ func (s *Server) handleTriggerRun(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return httpx.BadRequest("malformed project id")
 	}
+	// Ownership before anything else. Without this a valid project id from another
+	// organisation started a real pipeline run in that organisation's project.
+	if err := s.read.AssertProjectVisible(r.Context(), p.OrganisationID, projectID); err != nil {
+		return httpx.NotFound("project")
+	}
+
 	var body triggerRunRequest
 	if r.ContentLength > 0 {
 		if err := httpx.DecodeJSON(r, &body); err != nil {
 			return err
 		}
+	}
+	if err := body.validate(); err != nil {
+		return err
 	}
 
 	definitionID, definition, err := s.loadDefinition(r.Context(), projectID)
@@ -594,11 +703,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) error {
 			httpx.FieldError{Field: "release_id", Message: "must be a release identifier"})
 	}
 
-	var projectID domain.ID
-	if err := s.db.QueryRow(r.Context(),
-		`SELECT e.project_id FROM environments e JOIN projects p ON p.id = e.project_id
-		  WHERE e.id = $1 AND p.organisation_id = $2`, environmentID, p.OrganisationID).
-		Scan(&projectID); err != nil {
+	projectID, err := s.read.EnvironmentProject(r.Context(), p.OrganisationID, environmentID)
+	if err != nil {
 		return httpx.NotFound("environment")
 	}
 
@@ -638,6 +744,14 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return httpx.BadRequest("malformed environment id")
 	}
+
+	// The same ownership check the deploy path makes, through the same helper. When the
+	// two were written separately this one was simply missing, and a valid environment
+	// id was enough to roll back another organisation's production environment.
+	if _, err := s.read.EnvironmentProject(r.Context(), p.OrganisationID, environmentID); err != nil {
+		return httpx.NotFound("environment")
+	}
+
 	var body struct {
 		Reason    string `json:"reason"`
 		ToRelease string `json:"to_release"`
@@ -646,6 +760,10 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) error {
 		if err := httpx.DecodeJSON(r, &body); err != nil {
 			return err
 		}
+	}
+	if len(body.Reason) > 1024 {
+		return httpx.Validation("the rollback could not be requested",
+			httpx.FieldError{Field: "reason", Message: "must be at most 1024 characters"})
 	}
 	if body.Reason == "" {
 		body.Reason = "rollback requested by " + p.Email
@@ -834,6 +952,8 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) err
 		switch {
 		case errors.Is(err, webhooks.ErrInvalidSignature):
 			return httpx.Unauthorised("signature verification failed")
+		case errors.Is(err, webhooks.ErrMalformedDelivery):
+			return httpx.BadRequest("the delivery is missing required headers")
 		case errors.Is(err, webhooks.ErrUnknownRepo):
 			httpx.JSON(w, http.StatusAccepted, map[string]any{"outcome": "IGNORED"})
 			return nil

@@ -57,6 +57,13 @@ type Config struct {
 	AutoMigrate bool
 
 	CORSOrigins []string
+
+	// TrustProxyHeaders makes the API believe X-Forwarded-For when identifying a client
+	// for rate limiting. It defaults to false because the header is client-controlled:
+	// trusting it when nothing overwrites it hands every caller an unlimited supply of
+	// fresh rate-limit buckets. Enable it only behind an ingress that rewrites the
+	// header rather than appending to it.
+	TrustProxyHeaders bool
 }
 
 func Load(serviceName string) (Config, error) {
@@ -93,8 +100,9 @@ func Load(serviceName string) (Config, error) {
 		KindCluster:     env("NEXUS_KIND_CLUSTER", "nexus-local"),
 		ImageRepository: env("NEXUS_IMAGE_REPOSITORY", "nexus-demo"),
 
-		AutoMigrate: envBool("NEXUS_AUTO_MIGRATE", true),
-		CORSOrigins: envList("NEXUS_CORS_ORIGINS", []string{"http://localhost:3100"}),
+		AutoMigrate:       envBool("NEXUS_AUTO_MIGRATE", true),
+		CORSOrigins:       envList("NEXUS_CORS_ORIGINS", []string{"http://localhost:3100"}),
+		TrustProxyHeaders: envBool("NEXUS_TRUST_PROXY_HEADERS", false),
 	}
 
 	if err := c.Validate(); err != nil {

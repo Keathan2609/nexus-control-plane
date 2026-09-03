@@ -241,7 +241,55 @@ type AttemptView struct {
 	FinishedAt   *time.Time `json:"finished_at,omitempty"`
 }
 
-func (s *ReadStore) ListJobs(ctx context.Context, runID domain.ID) ([]JobView, error) {
+// visible reports whether a row is reachable from an organisation, returning
+// ErrNotFound when it is not.
+//
+// Tenant scope lives here rather than in the handler on purpose. A read that takes only
+// an object id is a read that is correct exactly as long as every caller remembers to
+// check ownership first, and two of them did not: a valid run id from another
+// organisation returned that organisation's jobs, and a valid job id returned its build
+// logs. Requiring the organisation in the signature makes the omission a compile error
+// instead of a disclosure.
+func (s *ReadStore) visible(ctx context.Context, query string, args ...any) error {
+	var ok bool
+	if err := s.db.QueryRow(ctx, query, args...).Scan(&ok); err != nil {
+		// pgx reports no rows as an error; either way the caller may not see this row.
+		return ErrNotFound
+	}
+	return nil
+}
+
+// AssertRunVisible returns ErrNotFound unless the run belongs to the organisation.
+func (s *ReadStore) AssertRunVisible(ctx context.Context, orgID, runID domain.ID) error {
+	return s.visible(ctx,
+		`SELECT true FROM pipeline_runs r JOIN projects p ON p.id = r.project_id
+		  WHERE r.id = $1 AND p.organisation_id = $2`, runID, orgID)
+}
+
+// AssertProjectVisible returns ErrNotFound unless the project belongs to the organisation.
+func (s *ReadStore) AssertProjectVisible(ctx context.Context, orgID, projectID domain.ID) error {
+	return s.visible(ctx,
+		`SELECT true FROM projects WHERE id = $1 AND organisation_id = $2`, projectID, orgID)
+}
+
+// EnvironmentProject resolves an environment to its project, scoped to the organisation.
+// Returns ErrNotFound for an environment belonging to anybody else, so a caller cannot
+// tell an unauthorised environment from a non-existent one.
+func (s *ReadStore) EnvironmentProject(ctx context.Context, orgID, envID domain.ID) (domain.ID, error) {
+	var projectID domain.ID
+	err := s.db.QueryRow(ctx,
+		`SELECT e.project_id FROM environments e JOIN projects p ON p.id = e.project_id
+		  WHERE e.id = $1 AND p.organisation_id = $2`, envID, orgID).Scan(&projectID)
+	if err != nil {
+		return "", ErrNotFound
+	}
+	return projectID, nil
+}
+
+func (s *ReadStore) ListJobs(ctx context.Context, orgID, runID domain.ID) ([]JobView, error) {
+	if err := s.AssertRunVisible(ctx, orgID, runID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(ctx,
 		`SELECT id, run_id, step_key, name, type, state, depends_on, wave,
 		        attempt, max_attempts, worker_id, error_code, error_message,
@@ -308,7 +356,17 @@ type LogLine struct {
 	LoggedAt time.Time `json:"logged_at"`
 }
 
-func (s *ReadStore) JobLogs(ctx context.Context, jobID domain.ID, attempt, limit int) ([]LogLine, error) {
+func (s *ReadStore) JobLogs(ctx context.Context, orgID, jobID domain.ID, attempt, limit int) ([]LogLine, error) {
+	// Build output is the most sensitive thing NEXUS stores: it is whatever a workload's
+	// build printed, which routinely includes configuration and occasionally a token a
+	// build script echoed by accident. It is scoped before it is read.
+	if err := s.visible(ctx,
+		`SELECT true FROM jobs j
+		   JOIN pipeline_runs r ON r.id = j.run_id
+		   JOIN projects p ON p.id = r.project_id
+		  WHERE j.id = $1 AND p.organisation_id = $2`, jobID, orgID); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.Query(ctx,
 		`SELECT seq, attempt, stream, message, logged_at
 		   FROM job_logs
