@@ -303,6 +303,13 @@ jobs:
           # upload and SBOM steps below still run: enforcement failing is not a reason
           # to also discard the report that says why.
           exit-code: '1'
+          # .trivyignore records individually-investigated, unavoidable findings with
+          # their reasoning — currently one: golang.org/x/crypto/openpgp, unmaintained
+          # upstream with no fixed version, never imported by this code, whose
+          # advisory carries no CVSS severity yet still reached this HIGH,CRITICAL
+          # gate. It is not a blanket exemption: a genuine HIGH or CRITICAL elsewhere
+          # still fails the build.
+          trivyignores: .trivyignore
 
       - name: Upload Trivy results to Security tab
         # !cancelled() rather than always(): still runs after Trivy fails on a genuine

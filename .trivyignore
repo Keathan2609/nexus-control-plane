@@ -1,0 +1,20 @@
+# Trivy ignore list.
+#
+# Every entry here is a proven, individually-investigated exception, not a way to make
+# scan output quiet. Enforcement is severity: HIGH,CRITICAL with exit-code: 1 in
+# .github/workflows/ci.yml — a real HIGH or CRITICAL finding in anything this ignores
+# would still need its own separate entry, and would not silently pass because the
+# module happens to appear here for an unrelated reason.
+
+# GO-2026-5932 — golang.org/x/crypto/openpgp: unmaintained, unsafe by design, no fix
+# available (Trivy reports "Fixed Version: " empty; govulncheck confirms "Fixed in: N/A").
+# Pulled in transitively as a required module, not imported or called anywhere in NEXUS's
+# own code — `govulncheck ./...` reports "0 vulnerabilities" in the symbol-reachability
+# scan and lists this only under modules required but never called. Its own advisory
+# severity is UNKNOWN rather than HIGH or CRITICAL; it reached CI's HIGH,CRITICAL
+# enforcement gate only because of how the pinned Trivy CLI version (bundled inside
+# aquasecurity/trivy-action) classifies Go vulnerability database advisories that carry
+# no CVSS rating. There is nothing to remediate: no fixed version exists to upgrade to,
+# and the code path is not reachable. Re-verify with `govulncheck ./...` after any
+# golang.org/x/crypto bump, since a genuinely fixed release would make this line stale.
+GO-2026-5932
