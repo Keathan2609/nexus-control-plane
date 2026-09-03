@@ -1,0 +1,36 @@
+# Secret scanning configuration.
+#
+# The default rule set is used in full. This file exists only to record the one
+# finding that is deliberately not a secret, with the reasoning attached, so the
+# scan stays meaningful: a scanner that reports a known false positive on every
+# run is a scanner people learn to ignore.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "hashicorp-tf-password"
+description = "Identified a HashiCorp Terraform password field"
+regex = '''(?i)(?:password\w*|passwd)\s*=\s*["']([^"']{8,})["']'''
+
+  [rules.allowlist]
+  description = """
+  grafana_values.admin.passwordKey names the field to read inside an existing
+  Kubernetes Secret; it is not the password. The value alongside it is
+  existingSecret, which is the pattern that keeps the credential out of the
+  repository in the first place. Flagging it would train the reader to skim
+  this report.
+  """
+  paths = ['''infrastructure/tofu/modules/nexus-observability/main\.tf''']
+  regexes = ['''admin-password''']
+
+[allowlist]
+description = "Paths that legitimately contain credential-shaped example values"
+paths = [
+  # Documents the shape of every setting and deliberately ships no real values;
+  # the secret entries are empty and production refuses to start without them.
+  '''\.env\.example$''',
+  # Lock files pin integrity hashes, which are high-entropy by design.
+  '''package-lock\.json$''',
+  '''go\.sum$''',
+]
