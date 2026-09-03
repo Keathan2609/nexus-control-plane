@@ -1,0 +1,43 @@
+# nexus-api — the control plane.
+#
+# Build context is the repository root:
+#   docker build -f deployments/docker/Dockerfile.api -t nexus-api .
+
+FROM golang:1.27-alpine AS build
+
+WORKDIR /src
+
+# Dependencies are copied and downloaded before the source, so a source-only change
+# reuses the module cache layer instead of re-downloading the whole graph.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+ARG VERSION=dev
+# CGO is disabled so the result is a static binary that runs on a distroless base with
+# no libc. -trimpath removes build-machine paths from the binary, which otherwise leak
+# the builder's directory layout into stack traces.
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o /out/nexus-api ./cmd/nexus-api
+
+# Distroless rather than alpine: no shell, no package manager, no busybox. If the API is
+# ever compromised there is nothing in the image to pivot with.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/nexus-api /usr/local/bin/nexus-api
+
+USER nonroot:nonroot
+EXPOSE 8080 9090
+
+# Exec form, no shell: the process is PID 1 and receives SIGTERM directly, which is what
+# makes the graceful shutdown path actually run on a rolling deploy.
+ENTRYPOINT ["/usr/local/bin/nexus-api"]
+
+LABEL org.opencontainers.image.title="nexus-api" \
+      org.opencontainers.image.description="NEXUS delivery control plane API" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.licenses="MIT"

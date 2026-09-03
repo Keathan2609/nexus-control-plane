@@ -1,0 +1,49 @@
+# nexus-worker — the execution plane.
+#
+#   docker build -f deployments/docker/Dockerfile.worker -t nexus-worker .
+
+FROM golang:1.27-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o /out/nexus-worker ./cmd/nexus-worker
+
+# The worker is not distroless, and that is a deliberate difference from the API.
+#
+# Its whole job is to execute pipeline steps, and those steps are shell commands. An
+# image with no shell cannot run them. The trade is accepted knowingly: the worker is the
+# component that runs untrusted-ish build commands, so in a real deployment it belongs in
+# its own namespace with its own service account and no access to the control plane's
+# secrets — which is how the Helm chart wires it.
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates git openssh-client tini \
+    && adduser -D -u 65532 -h /home/nexus nexus \
+    && mkdir -p /workspace && chown nexus:nexus /workspace
+
+COPY --from=build /out/nexus-worker /usr/local/bin/nexus-worker
+
+USER nexus:nexus
+WORKDIR /workspace
+EXPOSE 9090
+
+ENV NEXUS_WORKER_WORKDIR=/workspace
+
+# tini reaps the zombies that a process spawning build subprocesses inevitably creates.
+# Without an init, a worker that runs thousands of steps slowly fills the process table.
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/nexus-worker"]
+
+LABEL org.opencontainers.image.title="nexus-worker" \
+      org.opencontainers.image.description="NEXUS pipeline execution worker" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.licenses="MIT"

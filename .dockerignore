@@ -1,0 +1,29 @@
+# Build outputs
+bin/
+dist/
+web/.next/
+web/node_modules/
+web/out/
+node_modules/
+
+# Local state that must never reach an image
+.env
+.env.local
+*.tfstate
+*.tfstate.*
+**/.terraform/
+kubeconfig
+*.kubeconfig
+
+# Version control and tooling
+.git/
+.github/
+.claude/
+*.log
+*.pid
+
+# Not needed at build time
+docs/
+examples/
+infrastructure/
+test/

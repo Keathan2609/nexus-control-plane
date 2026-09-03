@@ -1,0 +1,33 @@
+# nexus-reconciler — the control loops.
+#
+#   docker build -f deployments/docker/Dockerfile.reconciler -t nexus-reconciler .
+
+FROM golang:1.27-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+      -trimpath \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o /out/nexus-reconciler ./cmd/nexus-reconciler
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/nexus-reconciler /usr/local/bin/nexus-reconciler
+
+USER nonroot:nonroot
+EXPOSE 9090
+
+ENTRYPOINT ["/usr/local/bin/nexus-reconciler"]
+
+LABEL org.opencontainers.image.title="nexus-reconciler" \
+      org.opencontainers.image.description="NEXUS reconciliation loops" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.licenses="MIT"

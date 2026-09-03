@@ -1,0 +1,52 @@
+# nexus-web — the console.
+#
+#   docker build -f deployments/docker/Dockerfile.web -t nexus-web .
+
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+COPY web/package.json web/package-lock.json* ./
+# npm ci rather than npm install: it installs exactly the lockfile and fails if the
+# lockfile and manifest disagree, which is the behaviour a build should have.
+RUN npm ci --no-audit --no-fund
+
+FROM node:22-alpine AS build
+
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY web ./
+
+# The API URL is compiled into the client bundle, because the console runs in a browser
+# and the browser is what has to reach the control plane. It is therefore a build-time
+# argument, not a runtime environment variable, and a deployment targeting a different
+# API needs a rebuild.
+ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_TELEMETRY_DISABLED=1
+
+RUN npm run build
+
+FROM node:22-alpine AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+
+RUN addgroup -g 1001 -S nodejs && adduser -S -u 1001 -G nodejs nextjs
+
+# Next.js standalone output ships only the files the server actually needs, which keeps
+# the runtime image close to the size of the application rather than of node_modules.
+COPY --from=build --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=build --chown=nextjs:nodejs /app/public ./public
+
+USER nextjs
+EXPOSE 3000
+
+CMD ["node", "server.js"]
+
+LABEL org.opencontainers.image.title="nexus-web" \
+      org.opencontainers.image.description="NEXUS console" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.licenses="MIT"
