@@ -23,6 +23,8 @@ type StepSpec struct {
 	DependsOn       []string          `json:"depends_on,omitempty"`
 	Command         string            `json:"command,omitempty"`
 	Image           string            `json:"image,omitempty"`
+	BuildContext    string            `json:"build_context,omitempty"`
+	Dockerfile      string            `json:"dockerfile,omitempty"`
 	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
 	MaxAttempts     int               `json:"max_attempts,omitempty"`
 	ContinueOnError bool              `json:"continue_on_error,omitempty"`
@@ -49,6 +51,8 @@ func ParseSpec(raw []byte) (Definition, error) {
 			DependsOn:       s.DependsOn,
 			Command:         s.Command,
 			Image:           s.Image,
+			BuildContext:    s.BuildContext,
+			Dockerfile:      s.Dockerfile,
 			TimeoutSeconds:  s.TimeoutSeconds,
 			ContinueOnError: s.ContinueOnError,
 			Env:             s.Env,
@@ -76,7 +80,9 @@ func MarshalSpec(d Definition) ([]byte, error) {
 	for _, s := range d.Steps {
 		out := StepSpec{
 			Key: s.Key, Name: s.Name, Type: string(s.Type), DependsOn: s.DependsOn,
-			Command: s.Command, Image: s.Image, TimeoutSeconds: s.TimeoutSeconds,
+			Command: s.Command, Image: s.Image,
+			BuildContext: s.BuildContext, Dockerfile: s.Dockerfile,
+			TimeoutSeconds:  s.TimeoutSeconds,
 			ContinueOnError: s.ContinueOnError, Env: s.Env,
 		}
 		if s.Retry != nil {

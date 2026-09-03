@@ -30,9 +30,11 @@ func (e *ExitError) Error() string { return fmt.Sprintf("step exited with status
 
 // StepSpec is the executable part of a job, stored on the job row at planning time.
 type StepSpec struct {
-	Command string            `json:"command"`
-	Image   string            `json:"image"`
-	Env     map[string]string `json:"env"`
+	Command      string            `json:"command"`
+	Image        string            `json:"image"`
+	Env          map[string]string `json:"env"`
+	BuildContext string            `json:"build_context"`
+	Dockerfile   string            `json:"dockerfile"`
 }
 
 // Router dispatches a job to the executor registered for its step type.

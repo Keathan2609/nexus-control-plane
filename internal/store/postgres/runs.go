@@ -117,9 +117,11 @@ func (s *RunStore) CreateRun(ctx context.Context, p CreateRunParams) (*Run, erro
 			timeout = 600
 		}
 		spec, err := json.Marshal(map[string]any{
-			"command": step.Command,
-			"image":   step.Image,
-			"env":     step.Env,
+			"command":       step.Command,
+			"image":         step.Image,
+			"env":           step.Env,
+			"build_context": step.BuildContext,
+			"dockerfile":    step.Dockerfile,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("marshal step spec: %w", err)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/Keathan2609/nexus/internal/build"
 	"github.com/Keathan2609/nexus/internal/core/domain"
 	"github.com/Keathan2609/nexus/internal/pipelines"
 	"github.com/Keathan2609/nexus/internal/platform/config"
@@ -70,7 +71,11 @@ func run() error {
 	router.Register(pipelines.StepShell, shell)
 	router.Register(pipelines.StepBuild, shell)
 	router.Register(pipelines.StepScan, shell)
-	router.Register(pipelines.StepContainer, shell)
+
+	// containerise builds a real image and records what it produced. The image it writes
+	// is the image the deployment path then runs - nothing regenerates a reference later.
+	router.Register(pipelines.StepContainer, workers.NewContainerExecutor(
+		build.NewBuilder(), db, cfg.ImageRepository, workDir()))
 	router.Register(pipelines.StepDeploy, workers.SleepExecutor{Duration: 900 * time.Millisecond})
 	router.Register(pipelines.StepVerify, workers.SleepExecutor{Duration: 600 * time.Millisecond})
 	router.Register(pipelines.StepPromote, workers.SleepExecutor{Duration: 300 * time.Millisecond})

@@ -43,12 +43,17 @@ func DefaultRetryPolicy() RetryPolicy {
 }
 
 type StepDef struct {
-	Key            string
-	Name           string
-	Type           StepType
-	DependsOn      []string
-	Command        string
-	Image          string
+	Key       string
+	Name      string
+	Type      StepType
+	DependsOn []string
+	Command   string
+	Image     string
+	// BuildContext and Dockerfile drive the containerise step. They are on the step
+	// rather than on the project because a monorepo builds several images from one
+	// repository, each from its own context.
+	BuildContext   string
+	Dockerfile     string
 	TimeoutSeconds int
 	Retry          *RetryPolicy
 	Env            map[string]string
