@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -146,7 +147,11 @@ func (b *DockerBuilder) Build(ctx context.Context, req Request, log func(stream,
 
 	// Build-arg values are never echoed. They are a common route for a token to reach a
 	// build, and the job log is persisted and displayed.
-	log("system", "docker build --tag "+req.Reference()+" "+req.ContextDir)
+	//
+	// The context is logged relative to the working directory for the same reason. An
+	// absolute path here puts the operator's home directory, and therefore their
+	// username, into a log that is stored, rendered in the console and screenshotted.
+	log("system", "docker build --tag "+req.Reference()+" "+displayPath(req.ContextDir))
 
 	started := time.Now()
 	if err := b.run.Run(ctx, args, log); err != nil {
@@ -213,6 +218,26 @@ func looksLikeCommit(s string) bool {
 		}
 	}
 	return true
+}
+
+// displayPath renders a build context for a log line.
+//
+// Relative to the working directory where that is meaningful, and unchanged otherwise —
+// a context on another volume, or one that would resolve to a chain of "..", is clearer
+// as it was given than as a relative path nobody can follow.
+func displayPath(dir string) string {
+	if !filepath.IsAbs(dir) {
+		return dir
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return filepath.Base(dir)
+	}
+	rel, err := filepath.Rel(wd, dir)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filepath.Base(dir)
+	}
+	return rel
 }
 
 // sanitiseTag strips anything Docker would reject in a tag. A slash would make the

@@ -3,6 +3,7 @@ package build_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -332,5 +333,58 @@ func TestBuildDoesNotLeakBuildArgsIntoLogs(t *testing.T) {
 		if strings.Contains(line, "s3cr3t-value") {
 			t.Fatalf("a build arg value leaked into the log: %q", line)
 		}
+	}
+}
+
+// A job log is persisted, rendered in the console and, for a portfolio project,
+// screenshotted. The absolute build-context path puts the operator's home directory —
+// username included — into all three. The command is logged with a path relative to the
+// working directory instead.
+func TestBuildLogsRelativeContextPath(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
+	}
+	absolute := filepath.Join(wd, "examples", "demo-go-service")
+
+	fake := &fakeRunner{}
+	b := build.NewBuilderWithRunner(fake)
+
+	var logged []string
+	_, err = b.Build(context.Background(), build.Request{
+		ContextDir: absolute,
+		Repository: "nexus-demo",
+		Tag:        "abc1234",
+	}, func(_, line string) { logged = append(logged, line) })
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	joined := strings.Join(logged, "\n")
+	if strings.Contains(joined, wd) {
+		t.Fatalf("the build log contains the absolute working directory:\n%s", joined)
+	}
+	if !strings.Contains(joined, "examples") {
+		t.Fatalf("the build log lost the context path entirely:\n%s", joined)
+	}
+}
+
+// A context outside the working directory cannot be made relative usefully, and must
+// still be logged rather than dropped.
+func TestBuildLogsUnrelatedContextPathUnchanged(t *testing.T) {
+	fake := &fakeRunner{}
+	b := build.NewBuilderWithRunner(fake)
+
+	var logged []string
+	_, err := b.Build(context.Background(), build.Request{
+		ContextDir: "relative/context",
+		Repository: "nexus-demo",
+		Tag:        "abc1234",
+	}, func(_, line string) { logged = append(logged, line) })
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "relative/context") {
+		t.Fatalf("a relative context path was not logged: %v", logged)
 	}
 }
