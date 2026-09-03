@@ -1,0 +1,27 @@
+# The same workload, built to fail its health check.
+#
+# This exists so the failure path can be demonstrated deterministically rather than by
+# waiting for something to break. It is a genuinely different image with a genuinely
+# different digest, so rolling back from it restores a different artefact rather than
+# re-applying the same one with a flag flipped.
+#
+# The application starts and serves. It simply reports itself unhealthy, which is the
+# realistic case: a process that is up but cannot do its job. A container that refuses
+# to start would be caught by the rollout rather than by health verification, and it is
+# health verification this is meant to exercise.
+#
+#   docker build -f examples/demo-go-service/Dockerfile.unhealthy \
+#     -t nexus-demo:unhealthy examples/demo-go-service
+
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY main.go go.mod ./
+ARG VERSION=unhealthy
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/service .
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/service /service
+ENV FAIL_HEALTHCHECK=true
+USER nonroot:nonroot
+EXPOSE 8080
+ENTRYPOINT ["/service"]

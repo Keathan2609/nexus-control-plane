@@ -1,0 +1,36 @@
+# The local Kubernetes cluster NEXUS deploys into.
+#
+#   kind create cluster --name nexus-local --config deployments/kubernetes/kind-cluster.yaml
+#
+# One node. A multi-node cluster would demonstrate scheduling, which is Kubernetes'
+# concern rather than the control plane's, and would triple the time this takes to come
+# up on a laptop.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: nexus-local
+
+nodes:
+  - role: control-plane
+    # Node ports published to the host, one per environment kind.
+    #
+    # They have to be declared here rather than derived at deploy time, because kind
+    # wires them into the node container when the cluster is created. That is why
+    # NodePortFor in internal/deployments/desired.go is a fixed mapping and not a hash:
+    # a computed port would be assigned by Kubernetes and unreachable from the host.
+    #
+    # The control plane probes these directly, so health verification is a real HTTP
+    # request to the application rather than an inspection of what Kubernetes believes.
+    extraPortMappings:
+      - containerPort: 30080     # production
+        hostPort: 30080
+        protocol: TCP
+      - containerPort: 30081     # staging
+        hostPort: 30081
+        protocol: TCP
+      - containerPort: 30082     # development
+        hostPort: 30082
+        protocol: TCP
+      - containerPort: 30083     # preview
+        hostPort: 30083
+        protocol: TCP
