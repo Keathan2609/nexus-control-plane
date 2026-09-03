@@ -161,7 +161,7 @@ func (c *client) do(method, path string, body any, out any) error {
 	if err != nil {
 		return fmt.Errorf("cannot reach the control plane at %s: %w", c.baseURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	payload, err := io.ReadAll(resp.Body)
 	if err != nil {

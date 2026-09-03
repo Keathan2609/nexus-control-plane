@@ -1,0 +1,70 @@
+# golangci-lint configuration.
+#
+# Explicit rather than implied. Without this file the linter runs whatever its default
+# set happens to be for the version that was installed, which means CI and a developer's
+# machine can disagree about whether the code passes — and the version installed by CI
+# changes on its own.
+#
+# The exclusions below are for rules that are stylistic rather than correctness
+# concerns. Each one carries its reasoning, because an exclusion without a reason is
+# indistinguishable from someone silencing an inconvenient finding.
+version: "2"
+
+run:
+  timeout: 10m
+  # Test files are linted too. A test that ignores an error it should assert on is worth
+  # knowing about; arguably more so than in production code, since a broken test fails
+  # silently by passing.
+  tests: true
+
+linters:
+  enable:
+    - errcheck      # an ignored error is the most common way a failure becomes silent
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    staticcheck:
+      checks:
+        - all
+        # QF1001: "could apply De Morgan's law". Rewriting a hexadecimal range check
+        # from !(a || b || c) into (!a && !b && !c) inverts every comparison and makes
+        # the intent harder to read, not easier. This is a preference, not a defect.
+        - -QF1001
+        # QF1002: "could use tagged switch". The switch in question branches on
+        # different predicates about one error, not on equality against a single value,
+        # so a tagged switch would not express the same thing.
+        - -QF1002
+
+  exclusions:
+    paths:
+      # web/node_modules contains an npm package that vendors a Go file of its own. It
+      # is third-party code that happens to sit inside this tree, and linting it
+      # reports problems nobody here can fix. Excluded so a developer with dependencies
+      # installed sees the same result as CI, which does not install them for the Go
+      # jobs.
+      - web/node_modules
+
+    rules:
+      # Writes to a tabwriter in the CLI. The individual Fprint calls cannot usefully
+      # fail on their own: tabwriter buffers, accumulates any error, and surfaces it
+      # from Flush — which every one of these call sites does check. Annotating each
+      # line with `_, _ =` would add noise around the one call that matters.
+      - path: cmd/nexus/
+        linters:
+          - errcheck
+        text: "fmt\\.(Fprint|Fprintf|Fprintln)"
+
+      # Writes to an already-hijacked Server-Sent Events response. A failed write means
+      # the client disconnected, which the loop detects through the request context on
+      # its next pass; there is no other recovery available at the call site.
+      - path: internal/api/v1/stream\.go
+        linters:
+          - errcheck
+        text: "fmt\\.(Fprint|Fprintf)"
+
+formatters:
+  enable:
+    - gofmt

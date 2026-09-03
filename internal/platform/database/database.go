@@ -84,7 +84,7 @@ func Migrate(ctx context.Context, url string) error {
 	if err != nil {
 		return fmt.Errorf("open migration connection: %w", err)
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 
 	if err := goose.UpContext(ctx, sqlDB, "."); err != nil {
 		return fmt.Errorf("apply migrations: %w", err)
@@ -104,7 +104,7 @@ func MigrateDown(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 	return goose.DownContext(ctx, sqlDB, ".")
 }
 
@@ -119,7 +119,7 @@ func Version(ctx context.Context, url string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 	return goose.GetDBVersionContext(ctx, sqlDB)
 }
 

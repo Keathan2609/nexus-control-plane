@@ -51,7 +51,7 @@ func (p *HTTPProber) Probe(ctx context.Context, target string) (ProbeResult, err
 		}
 		return ProbeResult{Status: "FAIL", LatencyMS: latency, Message: err.Error()}, nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return ProbeResult{Status: "PASS", HTTPStatus: resp.StatusCode, LatencyMS: latency}, nil

@@ -27,8 +27,14 @@ func TestAdmissionRefusesBeyondCapacity(t *testing.T) {
 func TestAdmissionReusesReleasedSlots(t *testing.T) {
 	a := newAdmission(2)
 
-	if !a.acquire() || !a.acquire() {
-		t.Fatal("both slots should have been available")
+	// Acquired one at a time and asserted separately. Folding both into a single
+	// `!a.acquire() || !a.acquire()` reads as a typo and only works because `||`
+	// evaluates its right operand when the left is false — which is the opposite of
+	// what a reader assumes short-circuiting does here.
+	for slot := 1; slot <= 2; slot++ {
+		if !a.acquire() {
+			t.Fatalf("slot %d should have been available", slot)
+		}
 	}
 	if a.acquire() {
 		t.Fatal("capacity was exceeded")

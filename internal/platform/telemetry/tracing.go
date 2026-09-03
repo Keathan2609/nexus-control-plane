@@ -87,6 +87,8 @@ func (t *Tracing) Start(ctx context.Context, name string, attrs ...attribute.Key
 }
 
 // Common attribute constructors, so the same key is never spelled two ways.
+
+// AttrProject names the project a span belongs to.
 func AttrProject(id string) attribute.KeyValue    { return attribute.String("nexus.project_id", id) }
 func AttrRun(id string) attribute.KeyValue        { return attribute.String("nexus.run_id", id) }
 func AttrJob(id string) attribute.KeyValue        { return attribute.String("nexus.job_id", id) }

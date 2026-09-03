@@ -1,6 +1,6 @@
 //go:build integration
 
-// Package integration exercises NEXUS against real PostgreSQL and NATS instances.
+// Package integration exercises NEXUS against a real PostgreSQL instance.
 //
 // These tests are guarded by the `integration` build tag so `go test ./...` stays fast
 // and dependency-free. Run them with:

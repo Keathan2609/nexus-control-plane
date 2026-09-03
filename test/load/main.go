@@ -225,7 +225,7 @@ func (r *runner) openStream(ctx context.Context) attempt {
 	// measure the machine's file-descriptor limit rather than the hub's.
 	buf := make([]byte, 128)
 	_, _ = resp.Body.Read(buf)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return attempt{status: resp.StatusCode, latency: time.Since(started)}
 }
 
@@ -282,7 +282,7 @@ func (r *runner) raw(ctx context.Context, method, path string, body any) ([]byte
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// The body must be drained even when it is not used, or the connection cannot be
 	// reused and the pool sizing above achieves nothing.
 	raw, err := io.ReadAll(resp.Body)
@@ -305,7 +305,7 @@ func login(ctx context.Context, client *http.Client, base, email, password strin
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("login returned %d", resp.StatusCode)
 	}

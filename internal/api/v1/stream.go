@@ -156,7 +156,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Tell the client the stream is live before anything happens, so the console can
 	// distinguish "connected, nothing has occurred" from "still connecting".
-	fmt.Fprintf(w, "event: ready\ndata: {\"subscribed\":true}\n\n")
+	_, _ = fmt.Fprintf(w, "event: ready\ndata: {\"subscribed\":true}\n\n")
 	flusher.Flush()
 
 	// Heartbeat: an idle SSE connection is indistinguishable from a dead one to any
@@ -171,7 +171,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": keepalive\n\n")
+			_, _ = fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		case payload, open := <-ch:
 			if !open {
@@ -180,7 +180,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// SSE frames are newline-delimited, so any newline inside the payload has
 			// to be escaped or the frame is truncated. JSON encoding already does that,
 			// but a defensive replace costs nothing and guards against a future change.
-			fmt.Fprintf(w, "event: nexus\ndata: %s\n\n",
+			_, _ = fmt.Fprintf(w, "event: nexus\ndata: %s\n\n",
 				strings.ReplaceAll(string(payload), "\n", ""))
 			flusher.Flush()
 		}
