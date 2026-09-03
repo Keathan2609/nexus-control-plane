@@ -168,18 +168,31 @@ jobs:
     name: Security Scanning
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Narrower than the workflow default: this job reads the repository and reports.
+    # It has no reason to write checks or upload SARIF.
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@d632683dd7b4114ad314bca15079f37a30b06314 # v4.2.0
+        with:
+          # Secret scanning needs the history, not just the tip. A credential removed
+          # in the latest commit is still published if it is reachable from any earlier
+          # one, and a shallow clone cannot see that.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@0a12454c4081eb480fe779abc71eb1e319ec5014 # v6.0.1
         with:
           go-version: '1.27'
 
+      # The module is published as golang.org/x/vuln. Installing it by its GitHub
+      # mirror path fails outright ("module declares its path as: golang.org/x/vuln"),
+      # which is what this step used to do — so it never actually scanned anything.
+      # Deliberately unpinned: a vulnerability scanner is only useful at its newest.
       - name: Run govulncheck
         run: |
-          go install github.com/golang/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
       - name: Set up Node.js for npm audit
@@ -187,10 +200,22 @@ jobs:
         with:
           node-version: '20'
 
+      # No continue-on-error. The console is at zero advisories, so a new one is a
+      # regression and should stop the build rather than scroll past in a log.
       - name: Run npm audit on web
         working-directory: web
-        continue-on-error: true
         run: npm audit --audit-level=moderate
+
+      # Scans the whole history on every push and pull request, so a credential can
+      # never reach the default branch unnoticed. .gitleaks.toml records the single
+      # known false positive with its reasoning rather than disabling the rule.
+      # Installed from source rather than through the marketplace action, which for
+      # organisations requires a licence key. Go is already set up on this runner, so
+      # this costs one build and keeps the job dependency-free.
+      - name: Scan git history for secrets
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@latest
+          gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --verbose
 
   build-images:
     name: Build Container Images

@@ -39,6 +39,45 @@ var redactedKeys = map[string]bool{
 	"password": true, "password_hash": true, "token": true, "token_hash": true,
 	"secret": true, "authorization": true, "api_key": true, "private_key": true,
 	"webhook_secret": true, "jwt_secret": true, "database_url": true,
+	"cookie": true, "set-cookie": true, "credential": true, "credentials": true,
+	"passwd": true, "signature": true,
+}
+
+// redactedMarkers catch the variants an exact list cannot anticipate. Callers name
+// fields to suit the code they are in — auth_token, client_secret, signing_key — and an
+// allowlist of exact spellings is one plausible new name away from a credential in a
+// log aggregator. Substring matching over a short list of markers is the cheap way to
+// be wrong in the safe direction.
+var redactedMarkers = []string{
+	"password", "passwd", "secret", "token", "credential",
+	"api_key", "apikey", "api-key", "private_key", "signing_key",
+	"encryption_key", "cookie", "authorization", "signature",
+}
+
+// measurementSuffixes are the endings that turn a secret-sounding name into a number.
+// token_count and secrets_configured are telemetry, and redacting them hides useful
+// data for no benefit — which is how people end up switching redaction off.
+var measurementSuffixes = []string{
+	"_count", "_total", "_configured", "_seconds", "_ms", "_bytes", "_size", "_len",
+}
+
+// shouldRedact reports whether a field name looks like it carries a credential.
+func shouldRedact(key string) bool {
+	k := strings.ToLower(key)
+	if redactedKeys[k] {
+		return true
+	}
+	for _, suffix := range measurementSuffixes {
+		if strings.HasSuffix(k, suffix) {
+			return false
+		}
+	}
+	for _, marker := range redactedMarkers {
+		if strings.Contains(k, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func New(service, level, format string) *slog.Logger {
@@ -57,7 +96,7 @@ func New(service, level, format string) *slog.Logger {
 }
 
 func redact(_ []string, a slog.Attr) slog.Attr {
-	if redactedKeys[strings.ToLower(a.Key)] {
+	if shouldRedact(a.Key) {
 		return slog.String(a.Key, "[redacted]")
 	}
 	return a
