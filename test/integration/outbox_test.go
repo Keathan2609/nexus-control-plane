@@ -127,12 +127,36 @@ func TestRelayPublishesPendingRowsAndMarksThem(t *testing.T) {
 	})
 
 	relay := outbox.NewRelay(db, pub)
-	n, err := relay.Drain(ctx, 100)
-	if err != nil {
-		t.Fatalf("drain: %v", err)
+
+	// Drain in a loop, as Run does. A single batch is not enough: the outbox is ordered
+	// oldest-first and the test database accumulates rows from earlier runs — including
+	// deliberately unpublishable ones from the failure tests — so this fixture's rows
+	// may sit well beyond the first batch. Looping tests the relay's actual behaviour
+	// rather than the state the database happened to be left in.
+	drained := 0
+	for pass := 0; pass < 50; pass++ {
+		n, err := relay.Drain(ctx, 200)
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+		drained += n
+
+		var remaining int
+		if err := db.QueryRow(ctx,
+			`SELECT count(*) FROM outbox WHERE aggregate_id=$1 AND published_at IS NULL`,
+			f.RunID).Scan(&remaining); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		if remaining == 0 {
+			break
+		}
+		if n == 0 {
+			t.Fatalf("the relay stopped draining with %d rows still pending", remaining)
+		}
 	}
-	if n < 3 {
-		t.Fatalf("expected at least 3 rows drained, got %d", n)
+
+	if drained < 3 {
+		t.Fatalf("expected at least 3 rows drained, got %d", drained)
 	}
 	if len(published) < 3 {
 		t.Fatalf("publisher saw %d events, expected at least 3", len(published))
