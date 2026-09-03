@@ -233,3 +233,64 @@ Three demonstrations exercise real code paths rather than simulations:
 | `./scripts/demo pipeline` | A run from checkout to promotion, including a real container build |
 | `./scripts/demo failure` | A release that fails verification, and the rollback that recovers it |
 | `./scripts/demo kill-worker` | A worker killed mid-job; the lease expires and another worker finishes it |
+
+---
+
+## GitHub social preview
+
+GitHub renders the social preview at **1280 × 640**, and crops to roughly 1200 × 600 on
+some surfaces, so keep everything meaningful inside a centred 1200 × 600 safe area. It is
+displayed at about half size in a link unfurl, which is the constraint that matters: at
+640 × 320 anything below roughly 28px is unreadable.
+
+No image is committed. Generating one here would mean inventing a visual identity in a
+format nobody could edit afterwards; this is the specification to hand to whatever tool
+you prefer.
+
+### Recommended layout
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                                                              │
+│   NEXUS                                                      │   ← wordmark, large
+│   Software delivery control plane                            │   ← subtitle, ~40% opacity
+│                                                              │
+│   Source → Pipeline → Build → Image → Deploy → Verify        │   ← the lifecycle strip
+│                                    ↓ fails                   │
+│                                 Rollback                     │
+│                                                              │
+│   Go · PostgreSQL · NATS · Kubernetes                        │   ← small, bottom
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Content
+
+| | |
+|---|---|
+| **Title** | `NEXUS` |
+| **Subtitle** | `Software delivery control plane` |
+| **Supporting line** | `Source → Pipeline → Build → Image → Deploy → Verify → Rollback` |
+| **Footer** | `Go · PostgreSQL · NATS · Kubernetes` |
+
+Alternative subtitles, if a different emphasis suits:
+
+- `Distributed pipelines. Real deployments. Observed health.`
+- `An internal developer platform that owns the whole lifecycle`
+
+### Visual direction
+
+Reuse the console's existing identity rather than inventing one — a near-black ground,
+one restrained accent, monospaced type for the lifecycle strip and a light sans for the
+wordmark. That way the preview and the screenshots read as the same product.
+
+The lifecycle strip is the whole idea in one line and should be the second thing the eye
+lands on. The branch down to **Rollback** is what distinguishes this from a CI badge, so
+it is worth the space even though it costs symmetry.
+
+Avoid: gradient meshes, floating 3D shapes, generic cloud iconography, and stock
+"DevOps infinity loop" imagery. They say nothing and they date badly.
+
+### Applying it
+
+Repository → **Settings** → **General** → **Social preview** → *Upload an image*.
