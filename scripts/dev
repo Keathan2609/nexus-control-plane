@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# NEXUS local development (bash / Git Bash / WSL).
+#
+#   ./scripts/dev up      Bring everything up and seed the demo estate
+#   ./scripts/dev down    Stop the processes, leave the data
+#   ./scripts/dev nuke    Stop everything and delete the volumes
+#   ./scripts/dev seed    Re-seed the demo estate
+#   ./scripts/dev test    Unit and integration tests
+#   ./scripts/dev build   Build every binary into ./bin
+#   ./scripts/dev logs    Tail the local process logs
+#   ./scripts/dev status  What is running
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE="$ROOT/deployments/docker/docker-compose.yml"
+LOGS="$ROOT/.runlogs"
+EXE=""
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;; esac
+
+export NEXUS_DATABASE_URL="${NEXUS_DATABASE_URL:-postgres://nexus:nexus@localhost:5436/nexus?sslmode=disable}"
+export NEXUS_NATS_URL="${NEXUS_NATS_URL:-nats://localhost:4222}"
+export NEXUS_ENVIRONMENT="${NEXUS_ENVIRONMENT:-development}"
+export NEXUS_LOG_FORMAT="${NEXUS_LOG_FORMAT:-text}"
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 is not on PATH. $2" >&2; exit 1; }; }
+
+wait_healthy() {
+  local container="$1" limit="${2:-90}"
+  for _ in $(seq 1 "$limit"); do
+    if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container" 2>/dev/null)" = "healthy" ]; then
+      echo "  $container healthy"; return 0
+    fi
+    sleep 1
+  done
+  echo "$container did not become healthy within ${limit}s" >&2; exit 1
+}
+
+start_bg() {
+  local name="$1"; shift
+  mkdir -p "$LOGS"
+  ( "$@" >"$LOGS/$name.log" 2>&1 & echo $! >"$LOGS/$name.pid" )
+  echo "  $name started (pid $(cat "$LOGS/$name.pid"))"
+}
+
+stop_bg() {
+  local name="$1"
+  [ -f "$LOGS/$name.pid" ] || return 0
+  kill "$(cat "$LOGS/$name.pid")" 2>/dev/null || true
+  rm -f "$LOGS/$name.pid"
+  echo "  stopped $name"
+}
+
+build_all() {
+  echo "Building binaries..."
+  cd "$ROOT"
+  for c in nexus-api nexus-worker nexus-reconciler nexus-seed; do
+    go build -o "bin/${c}${EXE}" "./cmd/$c"
+  done
+  go build -o "bin/nexus${EXE}" ./cmd/nexus
+  echo "  five binaries in ./bin"
+}
+
+case "${1:-help}" in
+  up)
+    need docker "Install Docker Desktop."
+    need go "Install Go 1.27 or newer."
+    need npm "Install Node 20 or newer."
+
+    echo "Starting backing services..."
+    docker compose -f "$COMPOSE" up -d postgres nats prometheus grafana jaeger
+    wait_healthy nexus-postgres
+    wait_healthy nexus-nats
+
+    build_all
+    echo "Seeding the demo estate..."
+    "$ROOT/bin/nexus-seed${EXE}"
+
+    echo "Starting the control plane..."
+    NEXUS_HTTP_ADDR=":8080" NEXUS_METRICS_ADDR=":9095" \
+      start_bg api "$ROOT/bin/nexus-api${EXE}"
+    NEXUS_METRICS_ADDR=":9096" NEXUS_WORKER_ID="wkr_local_1" NEXUS_WORKER_CONCURRENCY=4 \
+      start_bg worker-1 "$ROOT/bin/nexus-worker${EXE}"
+    NEXUS_METRICS_ADDR=":9098" NEXUS_WORKER_ID="wkr_local_2" NEXUS_WORKER_CONCURRENCY=4 \
+      start_bg worker-2 "$ROOT/bin/nexus-worker${EXE}"
+    NEXUS_METRICS_ADDR=":9097" \
+      start_bg reconciler "$ROOT/bin/nexus-reconciler${EXE}"
+
+    echo "Starting the console..."
+    cd "$ROOT/web"
+    [ -d node_modules ] || npm install --no-audit --no-fund
+    start_bg web npm run dev
+
+    cat <<BANNER
+
+NEXUS is up.
+  Console      http://localhost:3100
+  API          http://localhost:8080
+  Prometheus   http://localhost:9091
+  Grafana      http://localhost:3300
+  Jaeger       http://localhost:16687
+
+  Sign in as admin@nexus.local / nexus-demo-password
+BANNER
+    ;;
+
+  down)
+    for n in api worker-1 worker-2 reconciler web; do stop_bg "$n"; done
+    docker compose -f "$COMPOSE" stop
+    echo "Stopped. Data volumes kept; use nuke to remove them."
+    ;;
+
+  nuke)
+    for n in api worker-1 worker-2 reconciler web; do stop_bg "$n"; done
+    docker compose -f "$COMPOSE" down -v
+    echo "Everything removed, including volumes."
+    ;;
+
+  seed) build_all; "$ROOT/bin/nexus-seed${EXE}" --reset ;;
+  build) build_all ;;
+
+  test)
+    cd "$ROOT"
+    echo "Unit tests..."
+    go test ./...
+    echo "Integration tests..."
+    NEXUS_TEST_DATABASE_URL="postgres://nexus:nexus@localhost:5436/nexus_test?sslmode=disable" \
+      go test -tags=integration -timeout 300s ./test/integration/...
+    echo "Frontend..."
+    (cd web && npx tsc --noEmit)
+    echo "All checks passed."
+    ;;
+
+  logs)
+    for f in "$LOGS"/*.log; do
+      [ -e "$f" ] || continue
+      echo "=== $(basename "$f") ==="; tail -20 "$f"; echo
+    done
+    ;;
+
+  status)
+    docker compose -f "$COMPOSE" ps
+    echo
+    for f in "$LOGS"/*.pid; do
+      [ -e "$f" ] || continue
+      name="$(basename "$f" .pid)"
+      if kill -0 "$(cat "$f")" 2>/dev/null; then echo "  $name  running"; else echo "  $name  stopped"; fi
+    done
+    ;;
+
+  *) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+esac

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# NEXUS demonstrations.
+#
+#   ./scripts/demo pipeline      Trigger a run and follow it to completion
+#   ./scripts/demo failure       Deploy a build that fails health verification
+#   ./scripts/demo rollback      Roll an environment back to its last healthy release
+#   ./scripts/demo kill-worker   Kill a worker mid-job and watch the lease recover it
+#   ./scripts/demo load          Submit many runs at once and watch the queue drain
+#
+# Each of these exercises a real code path. Nothing here is simulated for the demo.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EXE=""
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;; esac
+CLI="$ROOT/bin/nexus${EXE}"
+API="${NEXUS_API_URL:-http://localhost:8080}"
+
+require_cli() {
+  [ -x "$CLI" ] || { echo "Build the CLI first: ./scripts/dev build" >&2; exit 1; }
+}
+
+token() {
+  if [ -n "${NEXUS_TOKEN:-}" ]; then echo "$NEXUS_TOKEN"; return; fi
+  curl -s -X POST "$API/api/v1/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"admin@nexus.local","password":"nexus-demo-password"}' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['token'])"
+}
+
+first_project() { "$CLI" project list | awk 'NR==2{print $1}'; }
+first_env()     { "$CLI" environment list | awk 'NR==2{print $1}'; }
+
+case "${1:-help}" in
+  pipeline)
+    require_cli
+    NEXUS_TOKEN="$(token)"; export NEXUS_TOKEN
+    "$CLI" project list
+    project="$(first_project)"
+    echo
+    echo "Triggering a run for $project"
+    out="$("$CLI" pipeline run "$project")"
+    echo "$out"
+    run="$(echo "$out" | grep -o 'run_[a-z0-9]*' | head -1)"
+    [ -n "$run" ] && "$CLI" pipeline watch "$run"
+    ;;
+
+  failure)
+    require_cli
+    NEXUS_TOKEN="$(token)"; export NEXUS_TOKEN
+    cat <<'TEXT'
+Deploying a build whose health endpoint returns 503.
+
+The apply succeeds. Verification does not: the prober requires consecutive
+passes and never gets one, so the deployment is recorded FAILED with every
+failed probe retained as evidence, and rollback becomes available.
+TEXT
+    echo
+    "$CLI" environment list
+    echo
+    echo "The demo services take FAIL_HEALTHCHECK=true to serve 503 from /healthz:"
+    echo "  cd examples/demo-go-service && FAIL_HEALTHCHECK=true PORT=31999 go run ."
+    echo
+    echo "Then roll the environment back:"
+    echo "  $CLI deployment rollback \$(./scripts/demo env-id)"
+    ;;
+
+  rollback)
+    require_cli
+    NEXUS_TOKEN="$(token)"; export NEXUS_TOKEN
+    "$CLI" environment list
+    env_id="$(first_env)"
+    echo
+    echo "Rolling back $env_id to its last healthy release..."
+    "$CLI" deployment rollback "$env_id"
+    echo
+    echo "The rollback ran the same apply and the same verification as any deployment."
+    echo "Who requested it is in the audit trail: http://localhost:3100/console/audit"
+    ;;
+
+  env-id)
+    require_cli
+    NEXUS_TOKEN="$(token)"; export NEXUS_TOKEN
+    first_env
+    ;;
+
+  kill-worker)
+    LOGS="$ROOT/.runlogs"
+    [ -f "$LOGS/worker-1.pid" ] || { echo "No worker running. Start with ./scripts/dev up" >&2; exit 1; }
+    worker_pid="$(cat "$LOGS/worker-1.pid")"
+    cat <<TEXT
+Killing worker-1 (pid $worker_pid).
+
+Any job it holds keeps its lease until that lease expires - up to
+NEXUS_WORKER_LEASE_SECONDS, 30s by default. The reconciler then returns the job
+to QUEUED with its attempt count intact, and worker-2 claims it. Nothing is lost
+and nothing runs twice.
+TEXT
+    kill "$worker_pid" 2>/dev/null || true
+    rm -f "$LOGS/worker-1.pid"
+    echo
+    echo "Killed. Watch the reconciler notice:"
+    echo "  tail -f $LOGS/reconciler.log"
+    ;;
+
+  load)
+    require_cli
+    NEXUS_TOKEN="$(token)"; export NEXUS_TOKEN
+    project="$(first_project)"
+    echo "Submitting 20 runs to $project..."
+    for i in $(seq 1 20); do
+      "$CLI" pipeline run "$project" >/dev/null
+      echo "  queued $i"
+    done
+    echo
+    "$CLI" status
+    echo
+    echo "Watch it drain at http://localhost:3100/console/infrastructure"
+    ;;
+
+  *) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+esac
