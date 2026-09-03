@@ -18,7 +18,6 @@ kubeconfig
 # Version control and tooling
 .git/
 .github/
-.claude/
 *.log
 *.pid
 
