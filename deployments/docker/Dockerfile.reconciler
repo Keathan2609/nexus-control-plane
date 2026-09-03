@@ -29,5 +29,5 @@ ENTRYPOINT ["/usr/local/bin/nexus-reconciler"]
 
 LABEL org.opencontainers.image.title="nexus-reconciler" \
       org.opencontainers.image.description="NEXUS reconciliation loops" \
-      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus-control-plane-new" \
       org.opencontainers.image.licenses="MIT"

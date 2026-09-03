@@ -135,7 +135,7 @@ GitHub Actions
 only if you intend to work on the code.
 
 ```bash
-git clone https://github.com/Keathan2609/nexus.git
+git clone https://github.com/Keathan2609/nexus-control-plane-new.git
 cd nexus
 docker compose -f deployments/docker/docker-compose.yml up -d --build
 ```

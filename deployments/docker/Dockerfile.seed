@@ -31,5 +31,5 @@ ENTRYPOINT ["/usr/local/bin/nexus-seed"]
 
 LABEL org.opencontainers.image.title="nexus-seed" \
       org.opencontainers.image.description="NEXUS schema migration and demo data" \
-      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus-control-plane-new" \
       org.opencontainers.image.licenses="MIT"

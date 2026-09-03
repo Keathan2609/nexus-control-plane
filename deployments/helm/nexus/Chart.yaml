@@ -9,9 +9,9 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 
-home: https://github.com/Keathan2609/nexus
+home: https://github.com/Keathan2609/nexus-control-plane-new
 sources:
-  - https://github.com/Keathan2609/nexus
+  - https://github.com/Keathan2609/nexus-control-plane-new
 
 keywords:
   - platform-engineering

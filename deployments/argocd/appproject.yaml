@@ -24,7 +24,7 @@ spec:
   # Exactly one repository. Not "*". If someone points a NEXUS Application at a fork or a
   # personal repo, the sync fails loudly instead of quietly deploying unreviewed manifests.
   sourceRepos:
-    - https://github.com/Keathan2609/nexus.git
+    - https://github.com/Keathan2609/nexus-control-plane-new.git
 
   destinations:
     - name: in-cluster

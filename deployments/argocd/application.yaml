@@ -28,7 +28,7 @@ spec:
   project: nexus
 
   source:
-    repoURL: https://github.com/Keathan2609/nexus.git
+    repoURL: https://github.com/Keathan2609/nexus-control-plane-new.git
     # A tag, not a branch. Pointing at HEAD of main means the cluster changes whenever
     # somebody merges, and "what was running at 14:20" becomes unanswerable. Promotion is
     # an explicit commit that moves this string - which is also what makes rollback a

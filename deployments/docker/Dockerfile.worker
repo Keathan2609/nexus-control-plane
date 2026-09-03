@@ -45,5 +45,5 @@ ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/nexus-worker"]
 
 LABEL org.opencontainers.image.title="nexus-worker" \
       org.opencontainers.image.description="NEXUS pipeline execution worker" \
-      org.opencontainers.image.source="https://github.com/Keathan2609/nexus" \
+      org.opencontainers.image.source="https://github.com/Keathan2609/nexus-control-plane-new" \
       org.opencontainers.image.licenses="MIT"
