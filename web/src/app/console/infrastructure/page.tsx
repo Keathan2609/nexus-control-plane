@@ -122,6 +122,19 @@ export default function InfrastructurePage(): ReactNode {
       <Section label="Platform">
         <KeyValue
           entries={[
+            [
+              'Deploy provider',
+              <span key="p" className={ui.mono}>
+                {data?.deploy_provider ?? '—'}
+                <span className={ui.dim}>
+                  {data?.deploy_provider === 'kubernetes'
+                    ? '  manifests applied to a cluster, rollout awaited, node port probed'
+                    : data?.deploy_provider === 'docker'
+                      ? '  containers on the local daemon, published port probed'
+                      : ''}
+                </span>
+              </span>,
+            ],
             ['Control plane', <span key="a" className={ui.mono}>nexus-api</span>],
             ['Execution plane', <span key="b" className={ui.mono}>nexus-worker</span>],
             ['Control loops', <span key="c" className={ui.mono}>nexus-reconciler</span>],

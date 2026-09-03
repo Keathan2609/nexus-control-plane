@@ -270,6 +270,8 @@ export interface Deployment {
   release_version: string;
   commit_sha: string;
   image: string;
+  image_digest?: string;
+  image_size_bytes?: number;
   desired_revision: string;
   actual_revision?: string;
   sync_status: string;
@@ -340,6 +342,8 @@ export interface OverviewMetrics {
 
 export interface Overview {
   metrics: OverviewMetrics;
+  /** Which applier is actually in use, reported by the control plane. */
+  deploy_provider?: string;
   recent_runs: Run[];
   recent_deployments: Deployment[];
   workers: Worker[];

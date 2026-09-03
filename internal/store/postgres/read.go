@@ -403,6 +403,8 @@ type DeploymentView struct {
 	ReleaseVersion  string     `json:"release_version"`
 	CommitSHA       string     `json:"commit_sha"`
 	Image           string     `json:"image"`
+	ImageDigest     string     `json:"image_digest"`
+	ImageSizeBytes  *int64     `json:"image_size_bytes,omitempty"`
 	DesiredRevision string     `json:"desired_revision"`
 	ActualRevision  *string    `json:"actual_revision,omitempty"`
 	SyncStatus      string     `json:"sync_status"`
@@ -420,7 +422,7 @@ type DeploymentView struct {
 func (s *ReadStore) ListDeployments(ctx context.Context, orgID, projectID, environmentID domain.ID, limit int, cursor string) ([]DeploymentView, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT d.id, d.project_id, d.environment_id, e.name, d.number, d.state,
-		        rel.version, rel.commit_sha, a.reference,
+		        rel.version, rel.commit_sha, a.reference, a.digest, a.size_bytes,
 		        d.desired_revision, d.actual_revision, d.sync_status, d.health_status,
 		        u.email, d.reason, (d.rollback_of IS NOT NULL),
 		        d.requested_at, d.started_at, d.verified_at, d.finished_at
@@ -446,6 +448,7 @@ func (s *ReadStore) ListDeployments(ctx context.Context, orgID, projectID, envir
 		var d DeploymentView
 		if err := rows.Scan(&d.ID, &d.ProjectID, &d.EnvironmentID, &d.EnvironmentName,
 			&d.Number, &d.State, &d.ReleaseVersion, &d.CommitSHA, &d.Image,
+			&d.ImageDigest, &d.ImageSizeBytes,
 			&d.DesiredRevision, &d.ActualRevision, &d.SyncStatus, &d.HealthStatus,
 			&d.RequestedBy, &d.Reason, &d.IsRollback, &d.RequestedAt, &d.StartedAt,
 			&d.VerifiedAt, &d.FinishedAt); err != nil {
@@ -608,7 +611,7 @@ var ErrNotFound = fmt.Errorf("not found")
 func (s *ReadStore) GetDeployment(ctx context.Context, orgID, id domain.ID) (*DeploymentView, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT d.id, d.project_id, d.environment_id, e.name, d.number, d.state,
-		        rel.version, rel.commit_sha, a.reference,
+		        rel.version, rel.commit_sha, a.reference, a.digest, a.size_bytes,
 		        d.desired_revision, d.actual_revision, d.sync_status, d.health_status,
 		        u.email, d.reason, (d.rollback_of IS NOT NULL),
 		        d.requested_at, d.started_at, d.verified_at, d.finished_at
@@ -629,6 +632,7 @@ func (s *ReadStore) GetDeployment(ctx context.Context, orgID, id domain.ID) (*De
 	var d DeploymentView
 	if err := rows.Scan(&d.ID, &d.ProjectID, &d.EnvironmentID, &d.EnvironmentName,
 		&d.Number, &d.State, &d.ReleaseVersion, &d.CommitSHA, &d.Image,
+		&d.ImageDigest, &d.ImageSizeBytes,
 		&d.DesiredRevision, &d.ActualRevision, &d.SyncStatus, &d.HealthStatus,
 		&d.RequestedBy, &d.Reason, &d.IsRollback, &d.RequestedAt, &d.StartedAt,
 		&d.VerifiedAt, &d.FinishedAt); err != nil {

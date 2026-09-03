@@ -112,6 +112,62 @@ not exist.
 **A saga coordinator.** Deployment is a linear state machine with a compensating action
 (rollback) that is itself an ordinary deployment. A coordinator would be ceremony.
 
+## Defects found by running it
+
+Every one of these was found by executing the system against real infrastructure, not by
+reading the code. They are recorded because the failure modes are more instructive than
+the fixes.
+
+**Non-monotonic ULIDs broke `ORDER BY id`.** Identifiers used `crypto/rand` entropy
+directly, so IDs minted inside the same millisecond ordered arbitrarily. Every list in
+the console sorts by id, so "most recent first" silently stopped being true precisely
+when the system was busiest. A monotonic entropy source fixed it; a test asserts the
+property.
+
+**Run numbers collided.** The counter row meant "next number to hand out", but the
+seeder consumed number 1 and left the counter at 1, so the next allocation duplicated it
+and hit the unique index. The schema caught it, which is the constraint doing its job.
+
+**A leaked transaction hung the whole test package.** A test that failed an assertion
+left a transaction open, its pooled connection checked out, and `pgxpool.Close` then
+blocked forever — one leaked transaction hanging every other test rather than failing
+one. Transactions in tests now register their rollback with `t.Cleanup`.
+
+**The scheduler depended on the reconciler tick.** Nothing advanced a run when a job
+finished, so each dependency wave waited for the next 10-second cycle: a nine-step
+pipeline of one-second steps took roughly 60 seconds for about 10 seconds of work.
+Workers now call `Advance` immediately after recording a result, which brought the same
+pipeline to about 9 seconds. The reconciler remains the safety net, not the scheduler.
+
+**Compose ordering was implicit.** The stack started the API before migrations had run.
+Expressing it as `service_completed_successfully` on a one-shot seed job made the
+ordering a constraint rather than a race.
+
+**Distroless images have no shell for a healthcheck.** A container healthcheck cannot be
+a command line when the image contains no shell, no `wget` and no `curl`. The binary
+probes itself through a `-healthcheck` flag instead, which adds nothing to the image and
+exercises the address the server is actually bound to.
+
+**A relative `--file` resolved against the wrong directory.** Docker resolves it against
+the process working directory, not the build context, so a worker running from the
+repository root looked for a Dockerfile at the root and failed. It is now joined to the
+context.
+
+**Every manual build produced the same image tag.** A synthesised commit such as
+`manual0903072400` truncates to `manual0` for every manual run ever made, so each build
+overwrote the previous image under the same tag and rollback had nothing distinct to
+return to. Only a plausible hex hash is truncated now.
+
+**Kubernetes rejected the revision as a label.** A revision reads as `r21@a84fc12`, and
+`@` is exactly the character a label value forbids — every apply was rejected. The label
+is sanitised and the exact revision travels in an annotation, which `Observe` reads, so
+drift comparison stays byte-exact.
+
+**`runAsNonRoot` could not verify a named user.** The kubelet must confirm the user is
+not root and cannot do that from the string `nonroot` that a distroless image declares;
+it refuses the container with `CreateContainerConfigError`. The UID is now numeric, which
+makes the guarantee checkable rather than nominal.
+
 ## Known weaknesses
 
 - **The rate limiter is per-process.** N replicas allow N times the rate. It exists to

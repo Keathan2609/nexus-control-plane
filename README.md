@@ -1,7 +1,13 @@
 # NEXUS
 
-A software delivery control plane. It takes a commit in a Git repository and drives it
-through test, build, packaging, deployment and health verification — and when
+**Internal Developer Platform / software delivery control plane.**
+
+```
+Source → Pipeline → Build → Container → Deploy → Verify → Observe → Recover
+```
+
+It takes a commit in a Git repository and drives it through test, build, a real container
+image, a real deployment to Docker or Kubernetes, and health verification — and when
 verification fails, back out again — recording every state transition as durable,
 auditable history.
 
@@ -64,6 +70,12 @@ reported as a failed rollback rather than assumed to have worked because it used
 **Modelling lifecycles as state machines.** Run, job and deployment states are closed
 sets with explicit transition tables. Illegal transitions return an error instead of
 silently corrupting history — [`internal/core/domain/state.go`](internal/core/domain/state.go).
+
+**Building and deploying the actual artefact.** The `containerise` step runs a real
+BuildKit build, tags the image immutably from the commit, and records its digest and
+size. That image — not a substitute, not a placeholder — is what the Kubernetes or Docker
+provider then runs, which is what makes "roll back to the previous image" a well-defined
+operation. See [docs/kubernetes.md](docs/kubernetes.md).
 
 ---
 
@@ -134,8 +146,24 @@ demonstration estate, then the API, two workers, the reconciler and the console.
 workers rather than one, so job claiming is genuinely contended and killing one
 demonstrates lease recovery with the other still running.
 
-To develop against it instead — backing services in Docker, the Go binaries on the host
-with a fast rebuild loop:
+### Deploying to real Kubernetes
+
+```powershell
+.\scripts\kind.ps1 bootstrap
+
+$env:NEXUS_DEPLOY_PROVIDER = 'kubernetes'
+$env:NEXUS_KUBE_CONTEXT    = 'kind-nexus-local'
+$env:NEXUS_KIND_CLUSTER    = 'nexus-local'
+.\scripts\dev.ps1 up
+```
+
+Pipelines then build a real image, load it into the `nexus-local` cluster, apply a
+Deployment and Service, wait for the rollout, and verify the application over its node
+port before recording `HEALTHY`. Full detail in [docs/kubernetes.md](docs/kubernetes.md).
+
+### Developing against it
+
+Backing services in Docker, the Go binaries on the host with a fast rebuild loop:
 
 ```powershell
 .\scripts\dev.ps1 up      # Windows
@@ -171,14 +199,15 @@ Ports are offset from the defaults so this stack runs alongside other projects.
 
 ## Screenshots
 
-<!-- Capture from a running instance at 1512×945. -->
+<!-- Capture from a running instance at 1512x945. See docs/screenshots/README.md. -->
 
 | | |
 |---|---|
-| Overview | `docs/images/overview.png` |
-| Pipeline run | `docs/images/run.png` |
-| Deployment verification | `docs/images/deployment.png` |
-| Environments | `docs/images/environments.png` |
+| Overview | `docs/screenshots/01-overview.png` |
+| Pipeline run | `docs/screenshots/02-pipeline-run.png` |
+| Deployment verification | `docs/screenshots/03-deployment.png` |
+| Observability | `docs/screenshots/04-observability.png` |
+| Infrastructure | `docs/screenshots/05-infrastructure.png` |
 
 ---
 
@@ -301,6 +330,7 @@ See [docs/security.md](docs/security.md).
 | [Reliability](docs/reliability.md) | What NEXUS guarantees, and what it does not |
 | [Security](docs/security.md) | Boundaries, RBAC, secrets |
 | [Observability](docs/observability.md) | Metrics, traces, logs |
+| [Kubernetes](docs/kubernetes.md) | The kind cluster, the real deployment path, both failure gates |
 | [Local development](docs/local-development.md) | Running and working on it |
 | [Decisions](docs/adr/) | Architecture decision records |
 
@@ -311,20 +341,18 @@ See [docs/security.md](docs/security.md).
 Stated plainly, because a portfolio project that pretends to be production-complete is
 less credible than one that knows its own edges.
 
-- **The Kubernetes applier is not wired to a live cluster.** The default local applier
-  runs deployed workloads as Docker containers and probes them over HTTP — genuinely
-  applying, genuinely verifying, genuinely rolling back. The GitOps path renders desired
-  state and models sync and drift, and the Argo CD Application exists, but reconciliation
-  against a real cluster has not been exercised end to end.
+- **Argo CD is modelled, not running.** The desired state NEXUS renders is what Argo CD
+  would reconcile and the Application manifest exists, but the demonstration applies to
+  the cluster directly rather than through a GitOps loop.
 - **Preview environments are modelled, not provisioned.** Pull-request environments have
   a lifecycle, an expiry and a reaper, and the reaper works. What they do not have is a
   real ingress and a public URL.
 - **Authentication is local.** Users, Argon2id hashes, JWTs and API tokens. The
   `Principal` type is the seam an OIDC provider would sit behind; that provider is not
   implemented.
-- **Container image builds are simulated in the demo pipeline.** The seeded pipeline runs
-  real subprocesses with real output, but `containerise` echoes rather than invoking
-  BuildKit, so a clean machine can run the demonstration without a toolchain.
+- **The cluster is a single kind node with no ingress.** Workloads are reached through
+  fixed node ports rather than a hostname, and images are loaded into the node because
+  there is no registry.
 - **The rate limiter is per-process.** N API replicas allow N times the configured rate.
   That is a deliberate trade — it exists to stop one client saturating one replica, not
   to enforce a global quota.

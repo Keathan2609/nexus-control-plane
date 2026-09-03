@@ -44,6 +44,7 @@ type Server struct {
 	deploys  *deployments.Service
 	webhooks *webhooks.Ingester
 	hub      *Hub
+	provider string
 }
 
 type Deps struct {
@@ -59,6 +60,7 @@ type Deps struct {
 	Deployments *deployments.Service
 	Webhooks    *webhooks.Ingester
 	Hub         *Hub
+	Provider    string
 }
 
 func NewServer(d Deps) *Server {
@@ -67,6 +69,7 @@ func NewServer(d Deps) *Server {
 		auth: d.Auth, audit: d.Audit, read: postgres.NewReadStore(d.DB),
 		runs: d.Runs, jobs: d.Jobs, sched: d.Scheduler,
 		deploys: d.Deployments, webhooks: d.Webhooks, hub: d.Hub,
+		provider: d.Provider,
 	}
 }
 

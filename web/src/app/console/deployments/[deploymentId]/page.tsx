@@ -19,7 +19,7 @@ import {
   ui,
 } from '@/components/ui';
 import { api, ApiError, type Deployment, type HealthCheck } from '@/lib/api';
-import { ago, duration, shortSha, timestamp } from '@/lib/format';
+import { ago, bytes, duration, shortSha, timestamp } from '@/lib/format';
 
 interface Response {
   deployment: Deployment;
@@ -137,6 +137,16 @@ export default function DeploymentPage(): ReactNode {
             entries={[
               ['Revision', <span key="r" className={ui.mono}>{d?.desired_revision ?? '—'}</span>],
               ['Image', <span key="i" className={ui.mono}>{d?.image ?? '—'}</span>],
+              [
+                'Digest',
+                <span key="dg" className={ui.mono} title={d?.image_digest}>
+                  {d?.image_digest ? d.image_digest.slice(0, 26) : '—'}
+                </span>,
+              ],
+              [
+                'Image size',
+                <span key="sz" className={ui.mono}>{bytes(d?.image_size_bytes)}</span>,
+              ],
               ['Commit', <span key="c" className={ui.mono}>{shortSha(d?.commit_sha)}</span>],
               ['Release', <span key="v" className={ui.mono}>{d?.release_version ?? '—'}</span>],
             ]}

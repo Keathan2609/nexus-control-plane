@@ -156,6 +156,7 @@ func run() error {
 		Scheduler: sched, Deployments: deploySvc,
 		Webhooks: webhooks.NewIngester(db, runs, cfg.WebhookSecret, log, metrics),
 		Hub:      hub,
+		Provider: string(provider),
 	})
 
 	go func() {

@@ -159,6 +159,9 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) error {
 		"recent_deployments": recentDeploys,
 		"workers":            workers,
 		"environments":       environments,
+		// Reported rather than assumed: the configured provider and the one actually in
+		// use differ whenever a cluster was requested and could not be reached.
+		"deploy_provider": s.provider,
 	})
 	return nil
 }
