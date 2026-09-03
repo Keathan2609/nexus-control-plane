@@ -120,6 +120,21 @@ func (h *apiHarness) do(t *testing.T, method, path, token string, body any) *htt
 	return resp
 }
 
+// newJSONRequest builds a JSON request without a credential, for tests that need to
+// control headers the harness would otherwise set.
+func newJSONRequest(method, url string, body any) (*http.Request, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(method, url, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
 func bodyOf(t *testing.T, resp *http.Response) string {
 	t.Helper()
 	raw, err := io.ReadAll(resp.Body)

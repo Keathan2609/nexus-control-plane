@@ -25,6 +25,15 @@ type Hub struct {
 	nextID      int64
 }
 
+// maxSubscribers bounds concurrent event-stream connections to this replica.
+//
+// Each subscriber holds a 64-slot buffer of serialised events, and an SSE connection is
+// by design long-lived, so nothing reclaims one until the client goes away. Without a
+// ceiling a client that opens streams in a loop grows the map and the buffers until the
+// process fails; refusing the connection instead is visible, recoverable, and leaves
+// every already-connected console working.
+const maxSubscribers = 512
+
 type subscriber struct {
 	ch chan []byte
 	// filter limits a subscriber to one project. Clients watching a single project
@@ -39,6 +48,9 @@ func NewHub() *Hub {
 func (h *Hub) subscribe(projectID string) (int64, <-chan []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.subscribers) >= maxSubscribers {
+		return 0, nil
+	}
 	h.nextID++
 	id := h.nextID
 	// Buffered: a slow client must not block the publisher. If the buffer fills, that
@@ -49,6 +61,9 @@ func (h *Hub) subscribe(projectID string) (int64, <-chan []byte) {
 }
 
 func (h *Hub) unsubscribe(id int64) {
+	if id == 0 {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if s, ok := h.subscribers[id]; ok {
@@ -114,6 +129,22 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The subscription is taken before any header is written, so a refusal can still be
+	// expressed as a status code. Once 200 and the SSE content type are on the wire the
+	// only way to say no is to hang up, which a client cannot distinguish from a crash.
+	projectID := r.URL.Query().Get("project_id")
+	if len(projectID) > 64 {
+		http.Error(w, "project_id is not a valid identifier", http.StatusBadRequest)
+		return
+	}
+	id, ch := h.subscribe(projectID)
+	if ch == nil {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "the event stream is at capacity; retry shortly", http.StatusServiceUnavailable)
+		return
+	}
+	defer h.unsubscribe(id)
+
 	header := w.Header()
 	header.Set("Content-Type", "text/event-stream")
 	header.Set("Cache-Control", "no-cache, no-transform")
@@ -122,10 +153,6 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// live stream into a long silence followed by a burst. This disables that.
 	header.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-
-	projectID := r.URL.Query().Get("project_id")
-	id, ch := h.subscribe(projectID)
-	defer h.unsubscribe(id)
 
 	// Tell the client the stream is live before anything happens, so the console can
 	// distinguish "connected, nothing has occurred" from "still connecting".

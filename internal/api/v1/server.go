@@ -45,6 +45,9 @@ type Server struct {
 	webhooks *webhooks.Ingester
 	hub      *Hub
 	provider string
+
+	// deployAdmission bounds how many deployments this replica drives at once.
+	deployAdmission *admission
 }
 
 type Deps struct {
@@ -69,7 +72,8 @@ func NewServer(d Deps) *Server {
 		auth: d.Auth, audit: d.Audit, read: postgres.NewReadStore(d.DB),
 		runs: d.Runs, jobs: d.Jobs, sched: d.Scheduler,
 		deploys: d.Deployments, webhooks: d.Webhooks, hub: d.Hub,
-		provider: d.Provider,
+		provider:        d.Provider,
+		deployAdmission: newAdmission(d.Config.MaxConcurrentDeployments),
 	}
 }
 
@@ -111,9 +115,14 @@ func (s *Server) Routes() http.Handler {
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Authenticate(s.auth))
-			apiLimiter := middleware.NewRateLimiter(50, 200).
-				TrustProxyHeaders(s.cfg.TrustProxyHeaders)
-			r.Use(apiLimiter.Limit)
+			// Keyed per principal, so one client's loop cannot consume everybody
+			// else's allowance. Setting the rate to zero disables it, which is how a
+			// capacity measurement gets the limiter out of the way.
+			if s.cfg.APIRateLimit > 0 {
+				apiLimiter := middleware.NewRateLimiter(s.cfg.APIRateLimit, s.cfg.APIRateBurst).
+					TrustProxyHeaders(s.cfg.TrustProxyHeaders)
+				r.Use(apiLimiter.Limit)
+			}
 
 			r.Get("/auth/me", s.wrap(s.handleMe))
 			r.Post("/auth/tokens", s.wrap(s.handleCreateToken))

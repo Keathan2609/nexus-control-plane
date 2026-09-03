@@ -64,6 +64,19 @@ type Config struct {
 	// fresh rate-limit buckets. Enable it only behind an ingress that rewrites the
 	// header rather than appending to it.
 	TrustProxyHeaders bool
+
+	// MaxConcurrentDeployments bounds the deployments one API replica will drive at
+	// once. Beyond it the API sheds requests with 503 rather than accepting work it
+	// cannot execute; deployments are minutes-long and hold a database connection and
+	// a cluster client each, so this is a real resource ceiling rather than a quota.
+	MaxConcurrentDeployments int
+
+	// APIRateLimit and APIRateBurst govern the authenticated API limiter, keyed per
+	// principal. They are configurable because the right ceiling depends entirely on
+	// what is in front of NEXUS and how many replicas are running, and because a
+	// capacity measurement needs to be able to take the limiter out of the way.
+	APIRateLimit float64
+	APIRateBurst float64
 }
 
 func Load(serviceName string) (Config, error) {
@@ -100,9 +113,12 @@ func Load(serviceName string) (Config, error) {
 		KindCluster:     env("NEXUS_KIND_CLUSTER", "nexus-local"),
 		ImageRepository: env("NEXUS_IMAGE_REPOSITORY", "nexus-demo"),
 
-		AutoMigrate:       envBool("NEXUS_AUTO_MIGRATE", true),
-		CORSOrigins:       envList("NEXUS_CORS_ORIGINS", []string{"http://localhost:3100"}),
-		TrustProxyHeaders: envBool("NEXUS_TRUST_PROXY_HEADERS", false),
+		AutoMigrate:              envBool("NEXUS_AUTO_MIGRATE", true),
+		CORSOrigins:              envList("NEXUS_CORS_ORIGINS", []string{"http://localhost:3100"}),
+		TrustProxyHeaders:        envBool("NEXUS_TRUST_PROXY_HEADERS", false),
+		MaxConcurrentDeployments: envInt("NEXUS_MAX_CONCURRENT_DEPLOYMENTS", 8),
+		APIRateLimit:             envFloat("NEXUS_API_RATE_LIMIT", 50),
+		APIRateBurst:             envFloat("NEXUS_API_RATE_BURST", 200),
 	}
 
 	if err := c.Validate(); err != nil {

@@ -708,6 +708,20 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) error {
 		return httpx.NotFound("environment")
 	}
 
+	// Admission before persistence. A slot taken after the row exists would leave a
+	// deployment nothing is driving if the slot were refused.
+	if !s.deployAdmission.acquire() {
+		return busy("deployments")
+	}
+	admitted := false
+	defer func() {
+		// Released here on every path that does not reach the executor, which takes
+		// ownership of the slot once it starts.
+		if !admitted {
+			s.deployAdmission.release()
+		}
+	}()
+
 	dep, err := s.deploys.Request(r.Context(), deployments.RequestParams{
 		ProjectID: projectID, EnvironmentID: environmentID, ReleaseID: releaseID,
 		RequestedBy: p.UserID, Reason: body.Reason,
@@ -726,7 +740,8 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) error {
 
 	// Execution is deliberately asynchronous: applying and verifying takes minutes and
 	// must not be tied to the lifetime of an HTTP request. The client follows progress
-	// on the event stream.
+	// on the event stream. Concurrency is bounded by the slot taken above.
+	admitted = true
 	go s.executeDeployment(dep.ID)
 
 	httpx.JSON(w, http.StatusAccepted, map[string]any{
@@ -817,6 +832,8 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) error {
 // context.Background rather than the request context: the client disconnecting must not
 // abort a deployment that is already changing a live environment.
 func (s *Server) executeDeployment(id domain.ID) {
+	defer s.deployAdmission.release()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	if err := s.deploys.Execute(ctx, id); err != nil {
